@@ -9,6 +9,6 @@ public interface GeminiConfig {
     @WithDefault("")
     String apiKey();
 
-    @WithDefault("gemini-3.6-flash")
+    @WithDefault("gemini-3.5-flash-lite")
     String modelo();
 }
