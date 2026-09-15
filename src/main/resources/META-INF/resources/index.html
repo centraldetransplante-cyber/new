@@ -2,88 +2,341 @@
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Separador de PDF</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
-  body {
-    font-family: system-ui, sans-serif;
-    max-width: 640px;
-    margin: 40px auto;
-    padding: 0 16px;
-    color: #1a1a1a;
+  :root {
+    --bg: #f4f6fb;
+    --card: #ffffff;
+    --text: #1a1d23;
+    --text-muted: #667085;
+    --border: #d9dee6;
+    --accent: #4f5fff;
+    --accent-hover: #3f4de0;
+    --accent-soft: #eef0ff;
+    --ok: #16a34a;
+    --ok-soft: #ecfdf3;
+    --erro: #dc2626;
+    --erro-soft: #fef2f2;
+    --shadow: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
   }
-  h1 { font-size: 1.4rem; }
-  p.sub { color: #555; margin-top: -8px; }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #191c22;
+      --text: #edeef1;
+      --text-muted: #9aa1ac;
+      --border: #2c313a;
+      --accent: #6f7dff;
+      --accent-hover: #8290ff;
+      --accent-soft: #1d2040;
+      --ok: #4ade80;
+      --ok-soft: #10261a;
+      --erro: #f87171;
+      --erro-soft: #2a1414;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px 60px;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .78rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 4px 10px;
+    border-radius: 999px;
+    margin-bottom: 14px;
+  }
+  h1 { font-size: 1.65rem; margin: 0 0 6px; letter-spacing: -.01em; }
+  p.sub { color: var(--text-muted); margin: 0 0 28px; line-height: 1.5; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: var(--shadow);
+  }
+
+  .categorias-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .tag {
+    font-size: .78rem;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
   .drop {
-    border: 2px dashed #999;
-    border-radius: 10px;
-    padding: 32px;
+    position: relative;
+    display: block;
+    border: 1.5px dashed var(--border);
+    border-radius: 12px;
+    padding: 36px 20px;
     text-align: center;
     cursor: pointer;
     transition: border-color .15s, background .15s;
   }
   .drop:hover, .drop.dragover {
-    border-color: #2563eb;
-    background: #f0f5ff;
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .drop input { display: none; }
-  #arquivoNome { margin-top: 10px; font-weight: 600; }
-  button {
-    margin-top: 16px;
-    width: 100%;
-    padding: 12px;
-    border: none;
-    border-radius: 8px;
-    background: #2563eb;
-    color: #fff;
-    font-size: 1rem;
-    cursor: pointer;
+  .drop-icon {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 12px;
+    color: var(--text-muted);
   }
-  button:disabled { background: #93b4f0; cursor: not-allowed; }
-  #status { margin-top: 16px; font-size: .95rem; }
-  #status.erro { color: #b91c1c; }
-  #status.ok { color: #15803d; }
-  ul#categorias {
+  .drop:hover .drop-icon, .drop.dragover .drop-icon { color: var(--accent); }
+  .drop-texto { color: var(--text); font-weight: 600; font-size: .95rem; }
+  .drop-subtexto { color: var(--text-muted); font-size: .82rem; margin-top: 4px; }
+
+  .arquivo-info {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--accent-soft);
+  }
+  .arquivo-info.ativo { display: flex; }
+  .arquivo-info svg { flex-shrink: 0; color: var(--accent); width: 22px; height: 22px; }
+  .arquivo-nome { font-weight: 600; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .arquivo-tamanho { font-size: .78rem; color: var(--text-muted); }
+  .arquivo-remover {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 4px;
+  }
+  .arquivo-remover:hover { color: var(--erro); }
+
+  button#enviar {
+    margin-top: 18px;
+    width: 100%;
+    padding: 13px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: .95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  button#enviar:hover:not(:disabled) { background: var(--accent-hover); }
+  button#enviar:disabled { opacity: .5; cursor: not-allowed; }
+
+  .progresso {
+    display: none;
+    margin-top: 16px;
+  }
+  .progresso.ativo { display: block; }
+  .progresso-barra-fundo {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .progresso-barra {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width .2s ease;
+  }
+  .progresso-texto {
     margin-top: 8px;
-    padding-left: 20px;
-    font-size: .9rem;
-    color: #444;
+    font-size: .82rem;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .resultado {
+    display: none;
+    margin-top: 18px;
+    padding: 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+  }
+  .resultado.ativo { display: block; }
+  .resultado.ok { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 30%, var(--border)); }
+  .resultado.erro { background: var(--erro-soft); border-color: color-mix(in srgb, var(--erro) 30%, var(--border)); }
+  .resultado-titulo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: .95rem;
+  }
+  .resultado.ok .resultado-titulo { color: var(--ok); }
+  .resultado.erro .resultado-titulo { color: var(--erro); }
+  .resultado-titulo svg { width: 20px; height: 20px; flex-shrink: 0; }
+  .resultado-lista {
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .resultado-lista li {
+    display: flex;
+    justify-content: space-between;
+    font-size: .85rem;
+    padding: 8px 10px;
+    background: var(--card);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .resultado-lista .nome { font-weight: 600; text-transform: capitalize; }
+  .resultado-lista .tamanho { color: var(--text-muted); }
+  .resultado-erro-msg { margin-top: 6px; font-size: .85rem; color: var(--text-muted); }
+
+  footer {
+    text-align: center;
+    margin-top: 24px;
+    font-size: .78rem;
+    color: var(--text-muted);
   }
 </style>
 </head>
 <body>
-  <h1>Separador de PDF</h1>
-  <p class="sub">Envie um PDF e ele será dividido em documentos, exames, TFD/RS e outros.</p>
+  <div class="wrap">
+    <span class="eyebrow">PDF Splitter</span>
+    <h1>Separador de PDF</h1>
+    <p class="sub">Envie um PDF e ele será dividido automaticamente por categoria (via IA, com fallback por palavra-chave).</p>
 
-  <label class="drop" id="drop">
-    <input type="file" id="arquivo" accept="application/pdf">
-    <div>Clique ou arraste um PDF aqui</div>
-    <div id="arquivoNome"></div>
-  </label>
+    <div class="card">
+      <div class="categorias-preview">
+        <span class="tag">Documentos</span>
+        <span class="tag">Exames</span>
+        <span class="tag">TFD/RS</span>
+        <span class="tag">Protocolo de Encaminhamento</span>
+        <span class="tag">Outros</span>
+      </div>
 
-  <button id="enviar" disabled>Separar PDF</button>
-  <div id="status"></div>
+      <label class="drop" id="drop">
+        <input type="file" id="arquivo" accept="application/pdf">
+        <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+          <path d="M12 3v12m0 0-4-4m4 4 4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="drop-texto">Clique ou arraste um PDF aqui</div>
+        <div class="drop-subtexto">Apenas arquivos .pdf</div>
+      </label>
+
+      <div class="arquivo-info" id="arquivoInfo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke-linejoin="round"/><path d="M14 2v6h6" stroke-linejoin="round"/></svg>
+        <div style="min-width:0">
+          <div class="arquivo-nome" id="arquivoNome"></div>
+          <div class="arquivo-tamanho" id="arquivoTamanho"></div>
+        </div>
+        <button class="arquivo-remover" id="arquivoRemover" title="Remover" type="button">&times;</button>
+      </div>
+
+      <button id="enviar" disabled>Separar PDF</button>
+
+      <div class="progresso" id="progresso">
+        <div class="progresso-barra-fundo"><div class="progresso-barra" id="progressoBarra"></div></div>
+        <div class="progresso-texto" id="progressoTexto">Enviando...</div>
+      </div>
+
+      <div class="resultado" id="resultado">
+        <div class="resultado-titulo" id="resultadoTitulo"></div>
+        <ul class="resultado-lista" id="resultadoLista"></ul>
+        <div class="resultado-erro-msg" id="resultadoErroMsg"></div>
+      </div>
+    </div>
+
+    <footer>Quarkus + PDFBox + Gemini</footer>
+  </div>
 
   <script>
     const input = document.getElementById('arquivo');
     const drop = document.getElementById('drop');
+    const arquivoInfo = document.getElementById('arquivoInfo');
     const nomeEl = document.getElementById('arquivoNome');
+    const tamanhoEl = document.getElementById('arquivoTamanho');
+    const removerBtn = document.getElementById('arquivoRemover');
     const botao = document.getElementById('enviar');
-    const status = document.getElementById('status');
+    const progresso = document.getElementById('progresso');
+    const progressoBarra = document.getElementById('progressoBarra');
+    const progressoTexto = document.getElementById('progressoTexto');
+    const resultado = document.getElementById('resultado');
+    const resultadoTitulo = document.getElementById('resultadoTitulo');
+    const resultadoLista = document.getElementById('resultadoLista');
+    const resultadoErroMsg = document.getElementById('resultadoErroMsg');
+
+    const ICONE_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const ICONE_ERRO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg>';
+
     let arquivoSelecionado = null;
+
+    function formatarTamanho(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function limparResultado() {
+      resultado.className = 'resultado';
+      resultadoLista.innerHTML = '';
+      resultadoErroMsg.textContent = '';
+    }
 
     function selecionar(arquivo) {
       if (!arquivo) return;
       if (arquivo.type !== 'application/pdf') {
-        mostrarStatus('Selecione um arquivo PDF.', 'erro');
+        mostrarErro('Selecione um arquivo PDF.');
         return;
       }
       arquivoSelecionado = arquivo;
       nomeEl.textContent = arquivo.name;
+      tamanhoEl.textContent = formatarTamanho(arquivo.size);
+      arquivoInfo.classList.add('ativo');
+      drop.style.display = 'none';
       botao.disabled = false;
-      mostrarStatus('', '');
+      limparResultado();
+    }
+
+    function limparSelecao() {
+      arquivoSelecionado = null;
+      input.value = '';
+      arquivoInfo.classList.remove('ativo');
+      drop.style.display = 'block';
+      botao.disabled = true;
+      limparResultado();
     }
 
     input.addEventListener('change', () => selecionar(input.files[0]));
+    removerBtn.addEventListener('click', limparSelecao);
 
     drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
@@ -93,46 +346,86 @@
       selecionar(e.dataTransfer.files[0]);
     });
 
-    function mostrarStatus(texto, classe) {
-      status.textContent = texto;
-      status.className = classe;
+    function mostrarErro(mensagem) {
+      resultado.className = 'resultado erro ativo';
+      resultadoTitulo.innerHTML = ICONE_ERRO + '<span>Falha ao processar</span>';
+      resultadoErroMsg.textContent = mensagem;
     }
 
-    botao.addEventListener('click', async () => {
+    async function mostrarSucesso(blob) {
+      resultado.className = 'resultado ok ativo';
+      resultadoTitulo.innerHTML = ICONE_OK + '<span>Concluído! Download iniciado.</span>';
+      resultadoLista.innerHTML = '';
+
+      try {
+        const zip = await JSZip.loadAsync(blob);
+        const entradas = Object.values(zip.files).filter(f => !f.dir);
+        for (const entrada of entradas) {
+          const conteudo = await entrada.async('uint8array');
+          const li = document.createElement('li');
+          const nome = entrada.name.replace(/\.pdf$/i, '').replace(/_/g, ' ');
+          li.innerHTML = '<span class="nome">' + nome + '</span><span class="tamanho">' + formatarTamanho(conteudo.length) + '</span>';
+          resultadoLista.appendChild(li);
+        }
+      } catch (e) {
+        // Se não conseguir ler o zip no navegador, o download já aconteceu normalmente.
+      }
+    }
+
+    function baixarBlob(blob, nomeArquivo) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = nomeArquivo;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    botao.addEventListener('click', () => {
       if (!arquivoSelecionado) return;
       botao.disabled = true;
-      mostrarStatus('Processando...', '');
+      limparResultado();
+      progresso.classList.add('ativo');
+      progressoBarra.style.width = '0%';
+      progressoTexto.textContent = 'Enviando...';
 
       const formData = new FormData();
       formData.append('file', arquivoSelecionado);
 
-      try {
-        const resposta = await fetch('/pdf-splitter/split', {
-          method: 'POST',
-          body: formData
-        });
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/pdf-splitter/split');
+      xhr.responseType = 'blob';
 
-        if (!resposta.ok) {
-          const texto = await resposta.text();
-          throw new Error(texto || ('Erro HTTP ' + resposta.status));
-        }
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressoBarra.style.width = pct + '%';
+        progressoTexto.textContent = pct < 100 ? ('Enviando... ' + pct + '%') : 'Processando no servidor...';
+      });
 
-        const blob = await resposta.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'documentos-separados.zip';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-
-        mostrarStatus('Concluído! O download do .zip foi iniciado.', 'ok');
-      } catch (erro) {
-        mostrarStatus('Falha ao processar: ' + erro.message, 'erro');
-      } finally {
+      xhr.addEventListener('load', async () => {
+        progresso.classList.remove('ativo');
         botao.disabled = false;
-      }
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const blob = xhr.response;
+          baixarBlob(blob, 'documentos-separados.zip');
+          await mostrarSucesso(blob);
+        } else {
+          const texto = await xhr.response.text().catch(() => '');
+          mostrarErro(texto || ('Erro HTTP ' + xhr.status));
+        }
+      });
+
+      xhr.addEventListener('error', () => {
+        progresso.classList.remove('ativo');
+        botao.disabled = false;
+        mostrarErro('Não foi possível conectar ao servidor.');
+      });
+
+      xhr.send(formData);
     });
   </script>
 </body>
