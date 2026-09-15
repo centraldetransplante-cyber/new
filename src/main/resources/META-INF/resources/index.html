@@ -156,27 +156,105 @@
 
   .progresso {
     display: none;
-    margin-top: 16px;
+    margin-top: 18px;
   }
   .progresso.ativo { display: block; }
   .progresso-barra-fundo {
+    position: relative;
     height: 6px;
     border-radius: 999px;
     background: var(--border);
     overflow: hidden;
   }
   .progresso-barra {
+    position: absolute;
+    inset: 0 auto 0 0;
     height: 100%;
     width: 0%;
     background: var(--accent);
     border-radius: 999px;
     transition: width .2s ease;
   }
+  .progresso-barra.indeterminado {
+    width: 36% !important;
+    left: -36%;
+    background: linear-gradient(90deg, transparent, var(--accent) 45%, var(--accent-hover) 55%, transparent);
+    animation: varrer 1.15s cubic-bezier(.4,0,.2,1) infinite;
+    transition: none;
+  }
+  @keyframes varrer {
+    0%   { left: -36%; }
+    100% { left: 100%; }
+  }
+
+  .progresso-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .progresso-icone-wrap {
+    position: relative;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    display: none;
+  }
+  .progresso.processando .progresso-icone-wrap { display: block; }
+  .progresso-icone-anel {
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: girar .8s linear infinite;
+  }
+  .progresso-icone-doc {
+    position: absolute;
+    inset: 6px;
+    color: var(--accent);
+    animation: respirar 1.6s ease-in-out infinite;
+  }
+  @keyframes girar { to { transform: rotate(360deg); } }
+  @keyframes respirar {
+    0%, 100% { opacity: .55; transform: scale(.9); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+
   .progresso-texto {
-    margin-top: 8px;
     font-size: .82rem;
     color: var(--text-muted);
     text-align: center;
+    min-height: 1.2em;
+  }
+  .progresso-texto .ponto-a, .progresso-texto .ponto-b, .progresso-texto .ponto-c {
+    display: inline-block;
+    animation: piscar 1.4s infinite;
+  }
+  .progresso-texto .ponto-b { animation-delay: .2s; }
+  .progresso-texto .ponto-c { animation-delay: .4s; }
+  @keyframes piscar {
+    0%, 80%, 100% { opacity: .2; }
+    40% { opacity: 1; }
+  }
+
+  .progresso-etapas {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .progresso-etapas span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: background .25s ease, transform .25s ease;
+  }
+  .progresso-etapas span.etapa-ativa {
+    background: var(--accent);
+    transform: scale(1.3);
   }
 
   .resultado {
@@ -265,7 +343,19 @@
 
       <div class="progresso" id="progresso">
         <div class="progresso-barra-fundo"><div class="progresso-barra" id="progressoBarra"></div></div>
-        <div class="progresso-texto" id="progressoTexto">Enviando...</div>
+        <div class="progresso-status">
+          <div class="progresso-icone-wrap">
+            <div class="progresso-icone-anel"></div>
+            <svg class="progresso-icone-doc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke-linejoin="round"/>
+              <path d="M14 2v6h6M9 13h6M9 17h4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="progresso-texto" id="progressoTexto">Enviando...</div>
+        </div>
+        <div class="progresso-etapas" id="progressoEtapas">
+          <span></span><span></span><span></span><span></span>
+        </div>
       </div>
 
       <div class="resultado" id="resultado">
@@ -289,6 +379,7 @@
     const progresso = document.getElementById('progresso');
     const progressoBarra = document.getElementById('progressoBarra');
     const progressoTexto = document.getElementById('progressoTexto');
+    const progressoEtapas = document.getElementById('progressoEtapas');
     const resultado = document.getElementById('resultado');
     const resultadoTitulo = document.getElementById('resultadoTitulo');
     const resultadoLista = document.getElementById('resultadoLista');
@@ -372,6 +463,42 @@
       }
     }
 
+    const MENSAGENS_PROCESSANDO = [
+      'Lendo as páginas do PDF',
+      'Classificando com IA',
+      'Separando por categoria',
+      'Montando o arquivo .zip'
+    ];
+    let cicloProcessando = null;
+
+    function comecarAnimacaoProcessando() {
+      progresso.classList.add('processando');
+      progressoBarra.classList.add('indeterminado');
+
+      const etapas = progressoEtapas.querySelectorAll('span');
+      let indice = 0;
+
+      const atualizar = () => {
+        progressoTexto.innerHTML = MENSAGENS_PROCESSANDO[indice] +
+          '<span class="ponto-a">.</span><span class="ponto-b">.</span><span class="ponto-c">.</span>';
+        etapas.forEach((el, i) => el.classList.toggle('etapa-ativa', i === indice));
+        indice = (indice + 1) % MENSAGENS_PROCESSANDO.length;
+      };
+
+      atualizar();
+      cicloProcessando = setInterval(atualizar, 1600);
+    }
+
+    function pararAnimacaoProcessando() {
+      if (cicloProcessando) {
+        clearInterval(cicloProcessando);
+        cicloProcessando = null;
+      }
+      progresso.classList.remove('processando');
+      progressoBarra.classList.remove('indeterminado');
+      progressoBarra.style.width = '0%';
+    }
+
     function baixarBlob(blob, nomeArquivo) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -387,9 +514,9 @@
       if (!arquivoSelecionado) return;
       botao.disabled = true;
       limparResultado();
+      pararAnimacaoProcessando();
       progresso.classList.add('ativo');
-      progressoBarra.style.width = '0%';
-      progressoTexto.textContent = 'Enviando...';
+      progressoTexto.textContent = 'Enviando... 0%';
 
       const formData = new FormData();
       formData.append('file', arquivoSelecionado);
@@ -402,10 +529,14 @@
         if (!e.lengthComputable) return;
         const pct = Math.round((e.loaded / e.total) * 100);
         progressoBarra.style.width = pct + '%';
-        progressoTexto.textContent = pct < 100 ? ('Enviando... ' + pct + '%') : 'Processando no servidor...';
+        progressoTexto.textContent = 'Enviando... ' + pct + '%';
+        if (pct >= 100) {
+          comecarAnimacaoProcessando();
+        }
       });
 
       xhr.addEventListener('load', async () => {
+        pararAnimacaoProcessando();
         progresso.classList.remove('ativo');
         botao.disabled = false;
 
@@ -420,6 +551,7 @@
       });
 
       xhr.addEventListener('error', () => {
+        pararAnimacaoProcessando();
         progresso.classList.remove('ativo');
         botao.disabled = false;
         mostrarErro('Não foi possível conectar ao servidor.');
