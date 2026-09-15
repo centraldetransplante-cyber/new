@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>Separador de PDF</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 640px;
+    margin: 40px auto;
+    padding: 0 16px;
+    color: #1a1a1a;
+  }
+  h1 { font-size: 1.4rem; }
+  p.sub { color: #555; margin-top: -8px; }
+  .drop {
+    border: 2px dashed #999;
+    border-radius: 10px;
+    padding: 32px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.dragover {
+    border-color: #2563eb;
+    background: #f0f5ff;
+  }
+  .drop input { display: none; }
+  #arquivoNome { margin-top: 10px; font-weight: 600; }
+  button {
+    margin-top: 16px;
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: #2563eb;
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  button:disabled { background: #93b4f0; cursor: not-allowed; }
+  #status { margin-top: 16px; font-size: .95rem; }
+  #status.erro { color: #b91c1c; }
+  #status.ok { color: #15803d; }
+  ul#categorias {
+    margin-top: 8px;
+    padding-left: 20px;
+    font-size: .9rem;
+    color: #444;
+  }
+</style>
+</head>
+<body>
+  <h1>Separador de PDF</h1>
+  <p class="sub">Envie um PDF e ele será dividido em documentos, exames, TFD/RS e outros.</p>
+
+  <label class="drop" id="drop">
+    <input type="file" id="arquivo" accept="application/pdf">
+    <div>Clique ou arraste um PDF aqui</div>
+    <div id="arquivoNome"></div>
+  </label>
+
+  <button id="enviar" disabled>Separar PDF</button>
+  <div id="status"></div>
+
+  <script>
+    const input = document.getElementById('arquivo');
+    const drop = document.getElementById('drop');
+    const nomeEl = document.getElementById('arquivoNome');
+    const botao = document.getElementById('enviar');
+    const status = document.getElementById('status');
+    let arquivoSelecionado = null;
+
+    function selecionar(arquivo) {
+      if (!arquivo) return;
+      if (arquivo.type !== 'application/pdf') {
+        mostrarStatus('Selecione um arquivo PDF.', 'erro');
+        return;
+      }
+      arquivoSelecionado = arquivo;
+      nomeEl.textContent = arquivo.name;
+      botao.disabled = false;
+      mostrarStatus('', '');
+    }
+
+    input.addEventListener('change', () => selecionar(input.files[0]));
+
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('dragover');
+      selecionar(e.dataTransfer.files[0]);
+    });
+
+    function mostrarStatus(texto, classe) {
+      status.textContent = texto;
+      status.className = classe;
+    }
+
+    botao.addEventListener('click', async () => {
+      if (!arquivoSelecionado) return;
+      botao.disabled = true;
+      mostrarStatus('Processando...', '');
+
+      const formData = new FormData();
+      formData.append('file', arquivoSelecionado);
+
+      try {
+        const resposta = await fetch('/pdf-splitter/split', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!resposta.ok) {
+          const texto = await resposta.text();
+          throw new Error(texto || ('Erro HTTP ' + resposta.status));
+        }
+
+        const blob = await resposta.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'documentos-separados.zip';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        mostrarStatus('Concluído! O download do .zip foi iniciado.', 'ok');
+      } catch (erro) {
+        mostrarStatus('Falha ao processar: ' + erro.message, 'erro');
+      } finally {
+        botao.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
