@@ -350,6 +350,7 @@
   }
   .metodo-badge .ponto { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .metodo-badge.gemini .ponto { background: #8b5cf6; }
+  .metodo-badge.gemini-contexto .ponto { background: #6366f1; }
   .metodo-badge.palavra-chave .ponto { background: #f59e0b; }
   .metodo-badge.regra-bloco .ponto { background: #06b6d4; }
   .metodo-badge.sem-texto .ponto { background: #ef4444; }
@@ -488,6 +489,7 @@
     const metodoPaginas = document.getElementById('metodoPaginas');
 
     const INFO_METODO = {
+      GEMINI_CONTEXTO: { classe: 'gemini-contexto', cor: '#6366f1', rotulo: 'Gemini com contexto (IA)' },
       GEMINI: { classe: 'gemini', cor: '#8b5cf6', rotulo: 'Gemini (IA)' },
       PALAVRA_CHAVE: { classe: 'palavra-chave', cor: '#f59e0b', rotulo: 'Palavra-chave (fallback)' },
       REGRA_BLOCO_TFD: { classe: 'regra-bloco', cor: '#06b6d4', rotulo: 'Regra de bloco TFD' },

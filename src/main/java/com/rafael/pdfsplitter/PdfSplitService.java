@@ -3,7 +3,6 @@ package com.rafael.pdfsplitter;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -16,7 +15,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -51,6 +49,8 @@ public class PdfSplitService {
 
     private final ClassificadorConfig config;
     private final GeminiClassificadorService geminiService;
+    private final ClassificadorPalavraChaveService palavraChave;
+    private final AgrupadorContextualService agrupadorContextual;
     private final ObjectMapper objectMapper;
 
     /**
@@ -62,9 +62,13 @@ public class PdfSplitService {
      */
     private final ExecutorService executorClassificacao = Executors.newFixedThreadPool(MAX_PARALELISMO_CLASSIFICACAO);
 
-    public PdfSplitService(ClassificadorConfig config, GeminiClassificadorService geminiService, ObjectMapper objectMapper) {
+    public PdfSplitService(ClassificadorConfig config, GeminiClassificadorService geminiService,
+            ClassificadorPalavraChaveService palavraChave, AgrupadorContextualService agrupadorContextual,
+            ObjectMapper objectMapper) {
         this.config = config;
         this.geminiService = geminiService;
+        this.palavraChave = palavraChave;
+        this.agrupadorContextual = agrupadorContextual;
         this.objectMapper = objectMapper;
     }
 
@@ -101,8 +105,22 @@ public class PdfSplitService {
             }
             achatarFormulario(origem);
 
-            List<PaginaClassificada> classificacoes = classificarPaginas(origem);
-            estenderBlocosTfd(classificacoes);
+            List<String> textos = extrairTextos(origem);
+            List<PaginaClassificada> classificacoes;
+            if ("PAGINA".equalsIgnoreCase(config.modo())) {
+                // Modo antigo (página a página + heurística de bloco de TFD) — mantido como
+                // "botão de pânico": trocar classificador.modo=PAGINA no Render volta a esse
+                // comportamento sem precisar reimplantar código, se o modo CONTEXTO se mostrar
+                // pior em algum caso real ainda não previsto.
+                classificacoes = classificarPaginasPorTexto(textos);
+                estenderBlocosTfd(classificacoes);
+            } else {
+                // Modo CONTEXTO (padrão): o Gemini recebe várias páginas de uma vez (com
+                // contexto das anteriores) e agrupa direto em documentos — ver
+                // AgrupadorContextualService e o histórico no CLAUDE.md sobre por que a
+                // classificação página-a-página isolada causava perda de páginas.
+                classificacoes = agrupadorContextual.classificar(textos);
+            }
             Map<Categoria, List<Integer>> paginasPorCategoria = agruparPorCategoria(classificacoes);
             byte[] zip = montarZip(origem, paginasPorCategoria);
             String relatorioJson = new String(gerarRelatorioJson(classificacoes), java.nio.charset.StandardCharsets.UTF_8);
@@ -129,13 +147,7 @@ public class PdfSplitService {
         }
     }
 
-    /**
-     * Extrai o texto de cada página (sequencial, é CPU local) e depois
-     * classifica em paralelo (as chamadas ao Gemini são I/O de rede — um PDF
-     * de 50 páginas em série podia passar de vários minutos e esbarrar em
-     * timeout do navegador/proxy).
-     */
-    private List<PaginaClassificada> classificarPaginas(PDDocument documento) throws IOException {
+    private List<String> extrairTextos(PDDocument documento) throws IOException {
         int totalPaginas = documento.getNumberOfPages();
         List<String> textos = new ArrayList<>(totalPaginas);
         PDFTextStripper stripper = new PDFTextStripper();
@@ -145,7 +157,16 @@ public class PdfSplitService {
             stripper.setEndPage(pagina);
             textos.add(stripper.getText(documento));
         }
+        return textos;
+    }
 
+    /**
+     * Modo PAGINA: classifica cada página em paralelo (as chamadas ao Gemini
+     * são I/O de rede — um PDF de 50 páginas em série podia passar de vários
+     * minutos e esbarrar em timeout do navegador/proxy).
+     */
+    private List<PaginaClassificada> classificarPaginasPorTexto(List<String> textos) throws IOException {
+        int totalPaginas = textos.size();
         List<Future<PaginaClassificada>> futuros = new ArrayList<>(totalPaginas);
         for (String texto : textos) {
             Callable<PaginaClassificada> tarefa = () -> classificarTexto(texto);
@@ -189,7 +210,7 @@ public class PdfSplitService {
      * da categoria).
      */
     private PaginaClassificada classificarTexto(String textoOriginal) {
-        String textoNormalizado = normalizar(textoOriginal);
+        String textoNormalizado = palavraChave.normalizar(textoOriginal);
         if (textoNormalizado.isBlank()) {
             return new PaginaClassificada(Categoria.OUTROS, MetodoClassificacao.SEM_TEXTO, textoNormalizado, null);
         }
@@ -197,7 +218,7 @@ public class PdfSplitService {
         ClassificacaoIa viaIa = geminiService.classificar(textoOriginal);
         if (viaIa != null) {
             if (viaIa.categoria() == Categoria.OUTROS) {
-                Categoria redeDeSeguranca = classificarPorPalavraChave(textoNormalizado);
+                Categoria redeDeSeguranca = palavraChave.classificar(textoNormalizado);
                 if (redeDeSeguranca != Categoria.OUTROS && !CATEGORIAS_TFD.contains(redeDeSeguranca)) {
                     return new PaginaClassificada(redeDeSeguranca, MetodoClassificacao.PALAVRA_CHAVE,
                             textoNormalizado, viaIa.inicioDocumento());
@@ -206,67 +227,8 @@ public class PdfSplitService {
             return new PaginaClassificada(viaIa.categoria(), MetodoClassificacao.GEMINI, textoNormalizado,
                     viaIa.inicioDocumento());
         }
-        Categoria viaPalavraChave = classificarPorPalavraChave(textoNormalizado);
+        Categoria viaPalavraChave = palavraChave.classificar(textoNormalizado);
         return new PaginaClassificada(viaPalavraChave, MetodoClassificacao.PALAVRA_CHAVE, textoNormalizado, null);
-    }
-
-    /**
-     * TFD_RS x TFD_OUTROS_ESTADOS exige as DUAS coisas na mesma página: um
-     * termo genérico de TFD ({@link ClassificadorConfig#tfdTermoGenerico()})
-     * E um marcador do RS ({@link ClassificadorConfig#tfdRsMarcador()}).
-     * Marcador do RS sozinho (ex.: "central estadual de transplantes" numa
-     * página que não é sobre TFD, comum aqui já que é uma central de
-     * transplantes) NÃO classifica como TFD — evita falso positivo.
-     */
-    private Categoria classificarPorPalavraChave(String textoNormalizado) {
-        boolean tfdGenerico = contemAlgumaPalavra(textoNormalizado, config.tfdTermoGenerico());
-        boolean marcadorRs = contemAlgumaPalavra(textoNormalizado, config.tfdRsMarcador());
-        if (tfdGenerico && marcadorRs) {
-            return Categoria.TFD_RS;
-        }
-        if (tfdGenerico) {
-            return Categoria.TFD_OUTROS_ESTADOS;
-        }
-        if (contemAlgumaPalavra(textoNormalizado, config.protocoloEncaminhamento())) {
-            return Categoria.PROTOCOLO_ENCAMINHAMENTO;
-        }
-        if (contemAlgumaPalavra(textoNormalizado, config.exames())) {
-            return Categoria.EXAMES;
-        }
-        if (contemAlgumaPalavra(textoNormalizado, config.documentos())) {
-            return Categoria.DOCUMENTOS;
-        }
-        return Categoria.OUTROS;
-    }
-
-    /**
-     * Palavras-chave muito curtas (ex.: "rg") não usam contains puro, senão
-     * batem dentro de qualquer palavra que contenha essas letras em sequência
-     * ("urgente", "orgao", "cirurgia", "energia"...) — usa-se \b (borda de
-     * palavra) só para essas. Palavras mais longas continuam com contains,
-     * que já tolera variações de pontuação/plural ao redor.
-     */
-    private boolean contemAlgumaPalavra(String textoNormalizado, List<String> palavrasChave) {
-        for (String palavra : palavrasChave) {
-            String normalizada = normalizar(palavra);
-            if (normalizada.length() <= 3) {
-                if (Pattern.compile("\\b" + Pattern.quote(normalizada) + "\\b").matcher(textoNormalizado).find()) {
-                    return true;
-                }
-            } else if (textoNormalizado.contains(normalizada)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private String normalizar(String texto) {
-        if (texto == null) {
-            return "";
-        }
-        String semAcento = Normalizer.normalize(texto, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}", "");
-        return semAcento.toLowerCase();
     }
 
     /**
@@ -415,7 +377,7 @@ public class PdfSplitService {
             // Sinal do Gemini: mais confiável que substring de palavra-chave.
             return inicioDocumento;
         }
-        return contemAlgumaPalavra(pagina.getTextoNormalizado(), config.tfdCabecalhoNovoDocumento());
+        return palavraChave.contemAlgumaPalavra(pagina.getTextoNormalizado(), config.tfdCabecalhoNovoDocumento());
     }
 
     private Map<Categoria, List<Integer>> agruparPorCategoria(List<PaginaClassificada> classificacoes) {
@@ -483,8 +445,36 @@ public class PdfSplitService {
         relatorio.put("resumoPorMetodo", resumo);
         relatorio.put("paginas", paginas);
         relatorio.put("paginasTruncadas", truncado);
+        relatorio.put("documentos", gerarBlocosDeDocumento(classificacoes));
 
         return objectMapper.writeValueAsBytes(relatorio);
+    }
+
+    /**
+     * Agrupa a lista final de páginas (já com categoria decidida, em qualquer
+     * modo) em blocos de páginas consecutivas da mesma categoria — é a forma
+     * mais direta de o usuário conferir se o agrupamento em documentos ficou
+     * certo (ex.: "páginas 1-5 = tfd_rs"), sem precisar abrir o PDF de cada
+     * categoria e contar.
+     */
+    private List<Map<String, Object>> gerarBlocosDeDocumento(List<PaginaClassificada> classificacoes) {
+        List<Map<String, Object>> blocos = new ArrayList<>();
+        if (classificacoes.isEmpty()) {
+            return blocos;
+        }
+        int inicio = 0;
+        for (int i = 1; i <= classificacoes.size(); i++) {
+            if (i == classificacoes.size()
+                    || classificacoes.get(i).getCategoria() != classificacoes.get(inicio).getCategoria()) {
+                Map<String, Object> bloco = new LinkedHashMap<>();
+                bloco.put("inicio", inicio + 1);
+                bloco.put("fim", i);
+                bloco.put("categoria", classificacoes.get(inicio).getCategoria().getPastaSaida());
+                blocos.add(bloco);
+                inicio = i;
+            }
+        }
+        return blocos;
     }
 
     private byte[] extrairPaginas(PDDocument origem, List<Integer> paginas) throws IOException {

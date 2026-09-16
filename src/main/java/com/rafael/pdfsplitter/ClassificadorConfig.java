@@ -67,7 +67,41 @@ public interface ClassificadorConfig {
      * {@link #tfdCabecalhoNovoDocumento()}. Quando {@code false}, volta ao
      * comportamento antigo (qualquer página classificada como TFD corta o
      * bloco), que perdia páginas de continuação.
+     *
+     * NOTA: as 3 configs acima (paginas-por-bloco, cabecalho-novo-documento,
+     * exigir-cabecalho) só valem no modo {@code PAGINA} ou quando o Gemini está
+     * indisponível no modo {@code CONTEXTO} — nesse modo o agrupamento em
+     * documentos vem direto do próprio Gemini, lendo várias páginas de uma vez.
      */
     @WithDefault("true")
     boolean tfdExigirCabecalhoParaQuebrarBloco();
+
+    /**
+     * {@code CONTEXTO} (padrão): o Gemini recebe várias páginas de uma vez
+     * (com contexto das páginas anteriores) e agrupa diretamente em
+     * documentos, resolvendo casos como um anexo de outro estado dentro de um
+     * pedido de TFD/RS sem precisar de heurística de bloco no Java.
+     * {@code PAGINA}: comportamento antigo, classifica página por página e
+     * tenta reconstruir blocos de TFD depois — mantido como "botão de
+     * pânico" (trocar essa env var no Render volta ao comportamento anterior
+     * sem precisar reimplantar código).
+     */
+    @WithDefault("CONTEXTO")
+    String modo();
+
+    /** Tamanho da janela de páginas enviada de uma vez ao Gemini no modo CONTEXTO. */
+    @WithDefault("10")
+    int contextoPaginasPorJanela();
+
+    /**
+     * Quantas páginas ANTERIORES à janela são reenviadas só como contexto
+     * (não classificadas de novo) para o Gemini decidir se a 1ª página da
+     * janela continua um documento que já vinha sendo descrito.
+     */
+    @WithDefault("4")
+    int contextoPaginasDeContexto();
+
+    /** Trunca o texto de cada página nesse tanto de caracteres antes de montar o prompt (OCR ruim pode gerar lixo). */
+    @WithDefault("2500")
+    int contextoMaxCaracteresPorPagina();
 }

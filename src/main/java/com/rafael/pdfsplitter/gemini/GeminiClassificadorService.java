@@ -1,5 +1,6 @@
 package com.rafael.pdfsplitter.gemini;
 
+import java.util.List;
 import java.util.Locale;
 
 import org.eclipse.microprofile.rest.client.inject.RestClient;
@@ -164,5 +165,134 @@ public class GeminiClassificadorService {
         }
         LOG.warnf("Resposta do Gemini não reconhecida como categoria: '%s'", texto);
         return null;
+    }
+
+    /**
+     * Modo CONTEXTO: em vez de classificar uma página isolada, manda uma janela de páginas de uma vez (mais
+     * páginas anteriores só como contexto, não reclassificadas) e pede ao Gemini para AGRUPAR as páginas em
+     * documentos — resolve na raiz o problema de um anexo com timbre próprio (ex.: laudo médico de outro estado
+     * dentro de um pedido de TFD/RS) ser confundido com o início de um documento novo, porque o modelo agora vê
+     * várias páginas em sequência, não uma por vez. Retorna {@code null} se todas as tentativas falharem — o
+     * chamador ({@code AgrupadorContextualService}) decide o fallback (por janela, não mais por página).
+     */
+    public ResultadoAgrupamento agrupar(List<String> textosContexto, int primeiraPaginaContexto,
+            List<String> textosDecisao, int primeiraPaginaDecisao) {
+        if (!disponivel()) {
+            return null;
+        }
+        int ultimaPaginaDecisao = primeiraPaginaDecisao + textosDecisao.size() - 1;
+        String prompt = montarPromptAgrupamento(textosContexto, primeiraPaginaContexto, textosDecisao, primeiraPaginaDecisao);
+        int maxOutputTokens = Math.min(8192, 24 * textosDecisao.size() + 256);
+
+        for (int tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+            try {
+                GeminiResponse resposta = client.gerarConteudo(config.modelo(), config.apiKey(),
+                        GeminiRequest.deTexto(prompt, maxOutputTokens));
+                return InterpretadorAgrupamento.interpretar(resposta.primeiroTexto(), primeiraPaginaDecisao, ultimaPaginaDecisao);
+            } catch (Exception e) {
+                if (tentativa == MAX_TENTATIVAS) {
+                    LOG.warn("Falha ao agrupar janela de páginas " + primeiraPaginaDecisao + "-" + ultimaPaginaDecisao
+                            + " com Gemini após " + MAX_TENTATIVAS + " tentativa(s), usando fallback por palavra-chave", e);
+                    return null;
+                }
+                LOG.debug("Falha ao agrupar janela com Gemini, tentando novamente", e);
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    private String montarPromptAgrupamento(List<String> textosContexto, int primeiraPaginaContexto,
+            List<String> textosDecisao, int primeiraPaginaDecisao) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("""
+                Você vai analisar páginas de texto extraídas de um PDF (uma digitalização de vários documentos
+                médicos/administrativos juntos) e AGRUPAR as páginas para CLASSIFICAR em DOCUMENTOS: sequências de
+                páginas consecutivas que formam UM MESMO pedido/documento físico (mesmo paciente, mesmo
+                procedimento, mesma sequência lógica), dizendo a categoria de cada documento.
+
+                """);
+
+        if (!textosContexto.isEmpty()) {
+            sb.append("Páginas de CONTEXTO abaixo (já classificadas antes — NÃO responda uma linha para elas, ")
+                    .append("servem só para você entender se a 1ª página a classificar continua algum documento ")
+                    .append("que já vinha sendo descrito):\n\n");
+            int pagina = primeiraPaginaContexto;
+            for (String texto : textosContexto) {
+                sb.append("--- página ").append(pagina).append(" (contexto) ---\n")
+                        .append(texto == null ? "" : texto.trim()).append('\n');
+                pagina++;
+            }
+            sb.append('\n');
+        }
+
+        sb.append("PÁGINAS PARA CLASSIFICAR (responda uma linha para CADA uma destas, na ordem):\n\n");
+        int pagina = primeiraPaginaDecisao;
+        for (String texto : textosDecisao) {
+            sb.append("--- página ").append(pagina).append(" ---\n")
+                    .append(texto == null ? "" : texto.trim()).append('\n');
+            pagina++;
+        }
+
+        sb.append("""
+
+                Responda no formato abaixo, uma linha por página a classificar (nada além disso — sem explicações,
+                sem markdown, sem cabeçalho):
+
+                numero_da_pagina|numero_do_documento|CATEGORIA
+
+                Regras de agrupamento:
+                - Páginas do MESMO documento físico recebem o MESMO numero_do_documento; documentos diferentes têm
+                  números diferentes. Numere localmente a partir de 1, na ordem em que os documentos aparecem entre
+                  as páginas A CLASSIFICAR (ignore qualquer numeração das páginas de contexto). Números de documento
+                  devem ser usados em sequência CONTÍNUA de páginas — nunca "reabra" um número já fechado.
+                - Um documento de TFD (RS ou de outro estado) pode ter só 1 página ou várias (capa + laudo médico +
+                  exames + documentos pessoais anexados) — julgue pelo CONTEÚDO (mesmo paciente, mesmo procedimento),
+                  nunca por um número fixo de páginas.
+                - Documentos, exames e protocolos avulsos (fora de um pedido de TFD) geralmente têm 1 página cada,
+                  mas podem ter mais se o conteúdo continuar claramente na página seguinte (ex.: exame de várias
+                  folhas, ou a 1ª página de decisão sendo continuação de um documento aberto no contexto).
+
+                IMPORTANTE sobre TFD — leia com atenção, é o erro mais comum: um pedido de TFD/RS quase sempre vem
+                acompanhado de um LAUDO MÉDICO emitido pela Secretaria de Saúde do estado de ORIGEM do paciente
+                (diferente do RS), com timbre/título institucional PRÓPRIO desse outro estado, justificando o
+                procedimento. Mesmo tendo timbre próprio, esse laudo é um ANEXO do MESMO pedido de TFD/RS que veio
+                antes — dê a ele o MESMO numero_do_documento da capa do RS, não abra um documento novo para ele,
+                mesmo que olhando SÓ para aquela página ela pareça um documento de TFD_OUTROS_ESTADOS independente.
+
+                Categorias possíveis (a categoria vale para o DOCUMENTO inteiro, decidida pela página que melhor o
+                identifica, normalmente a capa):
+                - TFD_RS: pedido de Tratamento Fora de Domicílio (TFD) do Rio Grande do Sul. Em ALGUMA página do
+                  documento aparece claramente um marcador do RS: "ESTADO DO RIO GRANDE DO SUL", "SECRETARIA
+                  ESTADUAL DE SAÚDE", "DEPARTAMENTO DE REGULAÇÃO ESTADUAL", "CENTRAL ESTADUAL DE TRANSPLANTES", ou o
+                  título "Solicitação de cadastro para consulta -TFD". Sem esse marcador claro, NÃO é TFD_RS mesmo
+                  que fale de TFD.
+                - TFD_OUTROS_ESTADOS: pedido de TFD igual em estrutura e finalidade, mas SEM nenhum marcador do RS
+                  (de outro estado, ou sem indicação clara de estado).
+                - PROTOCOLO_ENCAMINHAMENTO: protocolo de encaminhamento entre unidades/serviços de saúde (não
+                  confundir com um encaminhamento médico comum, que é DOCUMENTOS).
+                - EXAMES: pedidos, laudos ou resultados de exames médicos avulsos (sangue, imagem, etc.) — que NÃO
+                  fazem parte de um pedido de TFD.
+                - DOCUMENTOS: documentos pessoais e comprobatórios em geral — RG, CPF, identidade, certidões,
+                  comprovante de residência, declarações, procurações, carteira/cartão do SUS, encaminhamento
+                  médico comum.
+                - OUTROS: qualquer outro conteúdo que não se encaixe nas categorias acima.
+
+                Exemplo de resposta válida para uma janela de 5 páginas a classificar, onde as 3 primeiras são o
+                mesmo pedido de TFD/RS (capa do RS + laudo médico de outro estado anexado + um exame anexado) e as
+                2 últimas são exames avulsos e distintos entre si:
+                1|1|TFD_RS
+                2|1|TFD_RS
+                3|1|TFD_RS
+                4|2|EXAMES
+                5|3|EXAMES
+                """);
+
+        return sb.toString();
     }
 }

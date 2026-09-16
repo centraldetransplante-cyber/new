@@ -55,82 +55,89 @@ locally instead of falling back to keywords.
 
 ## Architecture: the classification pipeline
 
-`PdfSplitResource.split()` → `PdfSplitService.separar()` does, per uploaded PDF:
+`PdfSplitResource.split()` → `PdfSplitService.separar()` extracts every page's text with PDFBox
+(`extrairTextos`), then branches on `classificador.modo` (config: `CONTEXTO` default, `PAGINA` legacy/rollback — see
+below), groups the resulting per-page `Categoria` into a merged PDF per category, and builds the classification
+report. Both modes converge on the same `List<PaginaClassificada>` shape, `agruparPorCategoria`/`montarZip`, and
+`gerarRelatorioJson`.
 
-1. **Per-page classification** (`classificarPaginas`): extracts each page's text with PDFBox, then classifies it
-   via `classificarTexto` — tries Gemini first (`GeminiClassificadorService`), falls back to substring keyword
-   matching (`classificarPorPalavraChave`, config lists in `application.properties`) if Gemini is unavailable, times
-   out, or errors. Every page's `Categoria` + which method decided it (`MetodoClassificacao`: `GEMINI`,
-   `PALAVRA_CHAVE`, or `REGRA_BLOCO_TFD`) is tracked in `PaginaClassificada`, plus the page's normalized text and
-   (when Gemini answered) whether Gemini thinks the page is the *start* of a document vs a *continuation* of the
-   previous one (`ClassificacaoIa.inicioDocumento`).
+### Modo CONTEXTO (default) — `AgrupadorContextualService`
 
-2. **TFD block extension** (`estenderBlocosTfd`): the trickiest part of this codebase. A TFD (Tratamento Fora de
-   Domicílio) request is a bundle of several consecutive pages — a cover form plus attachments (checklists, ID
-   copies, exam results) — but usually only the cover page carries the keywords/header that make it classifiable.
-   When a `TFD_RS` or `TFD_OUTROS_ESTADOS` trigger page is found, the next `classificador.tfd-rs-paginas-por-bloco`
-   pages (default 3 total, i.e. 2 more after the trigger) are pulled into that same category, *overriding* whatever
-   they classified as on their own — **unless** one of them is itself judged to be the cover of *another* new TFD
-   request, via `iniciaNovoPedidoTfd`.
+This is the reason the pipeline was redesigned: classifying one page at a time, with zero visibility into
+neighboring pages, kept mis-grouping multi-page bundles (see "History" below for the specific bug that triggered
+the rewrite). Instead, `AgrupadorContextualService.classificar` sends the Gemini API a **window of several pages at
+once** (`classificador.contexto-paginas-por-janela`, default 10) plus a few pages of read-only context immediately
+before the window (`classificador.contexto-paginas-de-contexto`, default 4, truncated per-page at
+`classificador.contexto-max-caracteres-por-pagina`), and asks it to directly **segment the window into documents** —
+contiguous page ranges belonging to the same physical request — with a category each
+(`GeminiClassificadorService.agrupar` / `montarPromptAgrupamento`). The response is one line per page,
+`numero_da_pagina|numero_do_documento|CATEGORIA`, parsed defensively by `InterpretadorAgrupamento` (a line that
+doesn't match the pattern is skipped, not fatal — a lost line becomes one unresolved page, not a discarded
+response).
 
-   That "is this really a new cover page" check deliberately does NOT reuse the same keyword list used for
-   classification. Read the Javadoc on `iniciaNovoPedidoTfd` and the comment block above
-   `classificador.tfd-cabecalho-novo-documento` in `application.properties` before touching this — it exists
-   because of a real production bug: a genuine TFD/RS continuation page (e.g. a checklist justifying the request)
-   naturally mentions phrases like "tratamento fora de domicílio" in body text, which the broad
-   `classificador.tfd-termo-generico` list matches, wrongly signaling "new document starts here" and truncating the
-   block. The fix uses a two-tier signal: Gemini's explicit `INICIO`/`CONTINUACAO` verdict when available (trusted
-   over keywords), else a match against the *narrow*, header-only `tfd-cabecalho-novo-documento` list. Never widen
-   that list with anything that could plausibly appear in running prose — it exists specifically to be stricter
-   than `tfd-termo-generico`.
+Key pieces:
+- **Windows run sequentially** (not parallel) for now — simpler to reason about correctness-wise; if latency on
+  large PDFs (50+ pages) becomes a problem, parallelizing across windows (each window's Gemini call is independent
+  given its own context slice) is the natural next step, capped at a few concurrent calls to avoid 429s.
+- **Cross-window stitching** is a plain Java rule in `AgrupadorContextualService.classificar`, not another prompt
+  round-trip: if the first document of window *k* starts exactly where the last document of window *k-1* ended,
+  both have the *same* category, and that category is TFD (`TFD_RS`/`TFD_OUTROS_ESTADOS`), they're merged into one
+  bundle. Restricted to TFD on purpose — that's the only category where a request routinely spans a window boundary
+  (10 pages); merging arbitrary same-category singles just because they're adjacent would be over-eager elsewhere.
+- **`TFD_RS` gets a hard Java guard, never just trusted from the model**: `algumaPaginaConfirmaRs` demotes a
+  Gemini-labeled `TFD_RS` document to `TFD_OUTROS_ESTADOS` unless at least one of its pages actually contains both a
+  `classificador.tfd-rs-marcador` term and a `classificador.tfd-termo-generico` term — the same condition
+  `ClassificadorPalavraChaveService.classificar` uses. This is deliberately not symmetric: a stray RS marker never
+  promotes a document *to* `TFD_RS`.
+- **Fallback is per-window, not per-document**: if a window's Gemini call fails after retry, or comes back with
+  under 60% of its pages resolved (`COBERTURA_MINIMA`), the *entire* window falls back to
+  `ClassificadorPalavraChaveService.classificar` page-by-page (no TFD block-stitching within that fallback stretch —
+  a deliberate simplification; `PAGINA` mode remains the answer if that ever proves insufficient on real data). A
+  single unresolved page *within* an otherwise-successful window inherits the previous page's category if there is
+  one (holes in the middle of an identified block are overwhelmingly likely to be continuations of it), else falls
+  back to keyword classification for just that page.
+- **No Gemini key at all** still works: `geminiService.disponivel()` is checked per window, so every window
+  immediately takes the fallback path above — equivalent to running keyword-only classification per-window (without
+  TFD stitching across window boundaries in that condition, which only matters for a bundle that happens to straddle
+  a 10-page boundary).
 
-   `TFD_RS` vs `TFD_OUTROS_ESTADOS` distinguishes what *category a standalone request* belongs to: TFD/RS means
-   *specifically* Rio Grande do Sul's own cadastro form. The keyword fallback (`classificarPorPalavraChave`) requires
-   BOTH a generic TFD term (`classificador.tfd-termo-generico`) AND an RS marker (`classificador.tfd-rs-marcador`) on
-   the same page to call it TFD_RS — an RS marker alone (e.g. "central estadual de transplantes", which shows up in
-   this org's own non-TFD correspondence since they *are* a transplant center) is deliberately not enough.
+### Modo PAGINA (legacy, rollback switch) — page-by-page + block-extension heuristics
 
-   **Important, learned from a real production bug**: a page independently classified as the *other* TFD category
-   does NOT automatically break the block. A TFD/RS request is routinely bundled with a `LAUDO MÉDICO` issued by the
-   patient's *home state* health department (a different state's own letterhead/title, justifying the RS request) —
-   that attachment, on its own, legitimately matches `TFD_OUTROS_ESTADOS`'s definition, and Gemini's per-page INICIO
-   signal would naturally say INICIO too (it does have its own institutional letterhead). If `deveInterromperBloco`
-   ever unconditionally breaks the block on a differing TFD category (it did once, briefly, as an over-correction —
-   see git history around commit `76a5e86`), a real RS bundle gets truncated to just its cover page, with the
-   attachment wrongly landing alone in `tfd_outros_estados.pdf`. The fix: `deveInterromperBloco` always defers to
-   `iniciaNovoPedidoTfd` (Gemini INICIO/CONTINUACAO, else the narrow header list) for *any* TFD-classified page in
-   the window, same or different category — never an unconditional break. The Gemini prompt also explicitly tells
-   the model to answer CONTINUACAO for this "home-state laudo médico attached to a TFD/RS request" pattern. The
-   narrow `tfd-cabecalho-novo-documento` list must stay exclusive to the *RS cadastro form's own* header terms
-   (`estado do rio grande do sul`, `central estadual de transplantes`, `departamento de regulacao estadual`,
-   `solicitacao de cadastro para consulta`, `complexo regulador`) — generic health-department terms like `secretaria
-   estadual de saude` or `governo do estado` match *any* state's letterhead, including a legitimately-attached
-   home-state laudo, and must never go back in that list.
+Set `classificador.modo=PAGINA` (e.g. as a Render env var, no redeploy needed) to fall back to the original
+approach if `CONTEXTO` ever misbehaves on a real document in a way `PAGINA` didn't: `classificarPaginasPorTexto`
+classifies each page **in isolation** and in parallel (`classificarTexto` → Gemini first via
+`GeminiClassificadorService.classificar`, falling back to `ClassificadorPalavraChaveService.classificar` if Gemini
+is unavailable/fails/answers `OUTROS`), then `estenderBlocosTfd` tries to reconstruct multi-page TFD bundles
+after the fact using per-page heuristics (`deveInterromperBloco`, `iniciaNovoPedidoTfd`, `puxarCapaParaTras`,
+config `classificador.tfd-rs-paginas-por-bloco` / `tfd-cabecalho-novo-documento` /
+`tfd-exigir-cabecalho-para-quebrar-bloco`). These heuristics are documented in detail in code comments in
+`PdfSplitService` and are the accumulated fix history for a chain of real bugs (RS/other-state bundles getting
+mixed, continuation pages losing their cover, a same-state laudo médico attachment getting mistaken for a new
+document's cover — see git log around commits `76a5e86`/`5e4d416`). **This whole apparatus exists only because
+per-page classification has no visibility into neighboring pages** — that's exactly the limitation `CONTEXTO` mode
+was built to remove. Don't extend this heuristic further; if a new PAGINA-mode edge case shows up, prefer improving
+the `CONTEXTO` prompt/stitching logic instead, since PAGINA is meant to stay a frozen rollback path.
 
-   Two more edge cases handled in `estenderBlocosTfd`: `puxarCapaParaTras` pulls preceding `OUTROS` pages backward into
-   the block when the trigger page itself is marked CONTINUACAO (the real cover likely has no extractable text and
-   landed in OUTROS); and `deveInterromperBloco` also breaks the block on a *non-TFD* page that Gemini explicitly
-   marks INICIO (previously only TFD-classified pages could break a block, so a short 1-2 page TFD request would
-   swallow the start of the next real document).
+### Grouping, zip assembly, and the report (both modes)
 
-3. **Grouping + zip assembly** (`agruparPorCategoria`, `montarZip`): pages are grouped by final category (in
-   `Categoria` enum order) and each group becomes one merged PDF named `<categoria>.pdf` inside a flat zip (no
-   subfolders — this was an explicit user requirement, not an oversight).
-
-4. **Classification report**: `gerarRelatorioJson` builds a per-page JSON report (category + method per page, plus
-   totals per method) and it's returned to the client as base64 in the `X-Relatorio-Classificacao` response header
-   — deliberately NOT embedded as a file inside the zip (also an explicit requirement: the zip should contain only
-   the category PDFs). The frontend (`index.html`) decodes that header to render the "how was each page classified"
-   summary after a successful upload. The per-page detail list is capped at 500 entries (`paginasTruncadas: true` when
-   cut) so a very large PDF can't blow past a proxy's header-size limit and silently drop the whole report; the
-   per-method totals always cover every page regardless of the cap.
+- **Grouping + zip assembly** (`agruparPorCategoria`, `montarZip`): pages are grouped by final category (in
+  `Categoria` enum order) and each group becomes one merged PDF named `<categoria>.pdf` inside a flat zip (no
+  subfolders — explicit user requirement).
+- **Classification report** (`gerarRelatorioJson`): per-page category + method, totals per method, and — since the
+  CONTEXTO redesign — a `documentos` array of contiguous same-category page ranges (`gerarBlocosDeDocumento`,
+  e.g. `{"inicio":1,"fim":5,"categoria":"tfd_rs"}`), which is the most direct way for the user to sanity-check
+  whether the grouping matches what they see reading the PDF. Delivered as base64 in the `X-Relatorio-Classificacao`
+  response header, never as a file inside the zip (explicit requirement). Per-page detail capped at 500 entries
+  (`paginasTruncadas: true` when cut) so a huge PDF can't blow past a proxy's header-size limit; per-method totals
+  always cover every page regardless of the cap.
 
 ## Other things worth knowing
 
-- **Gemini calls run in parallel, one call per page**, via a small fixed thread pool (`classificarPaginas` in
-  `PdfSplitService`, capped at 8 concurrent) — text extraction (PDFBox) still happens sequentially first since it's
-  fast and not thread-safety-tested for concurrent access. Each Gemini call also retries once on failure before
-  falling back to keywords (`GeminiClassificadorService.classificar`, `MAX_TENTATIVAS`).
+- **`quarkus.rest-client.gemini-api.read-timeout` is 45000ms**, not the 15000ms it used to be — a CONTEXTO-mode
+  window call sends ~10+ pages of text and genuinely takes longer than a single-page call did. If this ever gets
+  changed back down, every CONTEXTO call will silently miss the timeout and the app will look "broken" (always
+  falling back to keywords) with no obvious error — check this first if Gemini classification seems to have
+  stopped working after a config change.
 - **Pages with no extractable text** (scanned image with no OCR layer) skip the Gemini call entirely — there's
   nothing to send — and are tagged `MetodoClassificacao.SEM_TEXTO` in the report instead of silently landing in
   `outros.pdf` with no indication anything went wrong.
@@ -146,8 +153,12 @@ locally instead of falling back to keywords.
 
 ## Adding a new category
 
-Add the enum value in `Categoria`, its keyword list + Gemini prompt entry, and decide whether it should participate
-in `CATEGORIAS_TFD`/the block-extension rule (only TFD-like multi-page bundles need that; most categories don't).
+Add the enum value in `Categoria`, its keyword list (`ClassificadorPalavraChaveService`/`application.properties`)
+and its entry in both Gemini prompts (`GeminiClassificadorService.montarPrompt` for PAGINA mode,
+`montarPromptAgrupamento` for CONTEXTO mode — keep the category descriptions consistent between the two, they drift
+easily since they're separate string blocks), and decide whether it should participate in the TFD-only
+cross-window stitching (`CATEGORIAS_TFD`, currently duplicated as a small `EnumSet` in both `PdfSplitService` and
+`AgrupadorContextualService` — only TFD-like multi-page bundles need that; most categories don't).
 
 ## Frontend
 
