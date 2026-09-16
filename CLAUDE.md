@@ -32,11 +32,19 @@ before starting a new one.
 
 ### Deploying
 
-There's no CI/CD wired up. Deploys are triggered manually via the Render API (no GitHub App is installed on the
-`centraldetransplante-cyber` org, so push-triggered auto-deploy does not fire):
+CI/CD is now wired up via `.github/workflows/deploy.yml`: every push to `main` triggers a GitHub Actions job that
+POSTs to the Render deploy API for this service. This works around there being no GitHub App installed on the
+`centraldetransplante-cyber` org (so Render's own push-triggered auto-deploy doesn't fire) — the Action carries the
+trigger instead.
+
+One-time setup (manual, needs GitHub repo admin access): add a repo secret named `RENDER_API_KEY` with a Render API
+key at https://github.com/centraldetransplante-cyber/new/settings/secrets/actions. Until that secret exists, the
+workflow runs on every push but the deploy step fails with 401 — check the Actions tab if a push doesn't show up on
+Render.
+
+Manual trigger (still works, e.g. to redeploy without a code change):
 
 ```shell
-git push                                                    # push to origin/main first
 curl -X POST -H "Authorization: Bearer $RENDER_API_KEY" \
   -H "Content-Type: application/json" -d '{}' \
   "https://api.render.com/v1/services/srv-dakpbkajnfac73bfsrkg/deploys"
