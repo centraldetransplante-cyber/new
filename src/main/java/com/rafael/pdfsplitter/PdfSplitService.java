@@ -25,9 +25,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public class PdfSplitService {
 
-    /** Nome do arquivo de relatório embutido no zip com o método de classificação usado por página. */
-    public static final String NOME_RELATORIO = "_relatorio-classificacao.json";
-
     private final ClassificadorConfig config;
     private final GeminiClassificadorService geminiService;
     private final ObjectMapper objectMapper;
@@ -42,16 +39,18 @@ public class PdfSplitService {
      * Lê o PDF de entrada, classifica cada página e devolve um .zip (em memória)
      * com um único PDF por categoria (sem pastas), juntando todas as páginas
      * daquela categoria na ordem em que aparecem no documento original, além de
-     * um relatório ({@value #NOME_RELATORIO}) dizendo se cada página foi
-     * classificada pelo Gemini, por palavra-chave (fallback) ou pela regra de
-     * bloco do TFD/RS.
+     * um relatório em JSON dizendo se cada página foi classificada pelo Gemini,
+     * por palavra-chave (fallback) ou pela regra de bloco do TFD/RS — esse
+     * relatório não entra no zip, é devolvido à parte para a UI exibir.
      */
-    public byte[] separarEmZip(InputStream pdfInputStream) throws IOException {
+    public ResultadoSeparacao separar(InputStream pdfInputStream) throws IOException {
         try (PDDocument origem = Loader.loadPDF(pdfInputStream.readAllBytes())) {
             List<PaginaClassificada> classificacoes = classificarPaginas(origem);
             estenderBlocosTfdRs(classificacoes);
             Map<Categoria, List<Integer>> paginasPorCategoria = agruparPorCategoria(classificacoes);
-            return montarZip(origem, paginasPorCategoria, classificacoes);
+            byte[] zip = montarZip(origem, paginasPorCategoria);
+            String relatorioJson = new String(gerarRelatorioJson(classificacoes), java.nio.charset.StandardCharsets.UTF_8);
+            return new ResultadoSeparacao(zip, relatorioJson);
         }
     }
 
@@ -115,11 +114,13 @@ public class PdfSplitService {
     /**
      * Normalmente só a 1ª página de um documento TFD/RS contém as palavras-chave;
      * as páginas seguintes do mesmo bloco costumam ser continuação sem texto
-     * identificável. Ao detectar o gatilho, as próximas páginas até completar o
-     * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) também
-     * são marcadas como TFD/RS, mesmo sem palavra-chave própria — o método
-     * registrado para essas páginas é REGRA_BLOCO_TFD_RS, não a classificação
-     * real (Gemini/palavra-chave) que elas teriam recebido isoladamente.
+     * identificável (caem em OUTROS na classificação isolada). Ao detectar o
+     * gatilho, as próximas páginas até completar o tamanho do bloco (config:
+     * classificador.tfd-rs-paginas-por-bloco) também são marcadas como TFD/RS —
+     * mas SOMENTE se elas não tiverem sido classificadas como algo próprio
+     * (OUTROS). Uma página que já foi identificada como outra categoria (por
+     * IA ou palavra-chave) significa que um novo documento começou ali, então
+     * essa regra não a sobrescreve.
      */
     private void estenderBlocosTfdRs(List<PaginaClassificada> classificacoes) {
         List<Categoria> original = new ArrayList<>();
@@ -136,6 +137,11 @@ public class PdfSplitService {
             }
             int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
             for (int j = i + 1; j < fimBloco; j++) {
+                if (original.get(j) != Categoria.OUTROS) {
+                    // Página já tem classificação própria (ex: começo de outro
+                    // documento) — não faz parte do bloco TFD/RS, para de estender.
+                    break;
+                }
                 classificacoes.get(j).setCategoria(Categoria.TFD_RS);
                 classificacoes.get(j).setMetodo(MetodoClassificacao.REGRA_BLOCO_TFD_RS);
             }
@@ -152,8 +158,7 @@ public class PdfSplitService {
         return paginasPorCategoria;
     }
 
-    private byte[] montarZip(PDDocument origem, Map<Categoria, List<Integer>> paginasPorCategoria,
-            List<PaginaClassificada> classificacoes) throws IOException {
+    private byte[] montarZip(PDDocument origem, Map<Categoria, List<Integer>> paginasPorCategoria) throws IOException {
         ByteArrayOutputStream zipBytes = new ByteArrayOutputStream();
 
         try (ZipOutputStream zip = new ZipOutputStream(zipBytes)) {
@@ -170,10 +175,6 @@ public class PdfSplitService {
                 zip.write(pdfDaCategoria);
                 zip.closeEntry();
             }
-
-            zip.putNextEntry(new ZipEntry(NOME_RELATORIO));
-            zip.write(gerarRelatorioJson(classificacoes));
-            zip.closeEntry();
         }
         return zipBytes.toByteArray();
     }

@@ -455,7 +455,6 @@
     const metodoDetalheToggle = document.getElementById('metodoDetalheToggle');
     const metodoPaginas = document.getElementById('metodoPaginas');
 
-    const NOME_RELATORIO = '_relatorio-classificacao.json';
     const INFO_METODO = {
       GEMINI: { classe: 'gemini', cor: '#8b5cf6', rotulo: 'Gemini (IA)' },
       PALAVRA_CHAVE: { classe: 'palavra-chave', cor: '#f59e0b', rotulo: 'Palavra-chave (fallback)' },
@@ -559,7 +558,7 @@
       metodoResumo.style.display = 'block';
     }
 
-    async function mostrarSucesso(blob) {
+    async function mostrarSucesso(blob, relatorioBase64) {
       resultado.className = 'resultado ok ativo';
       resultadoTitulo.innerHTML = ICONE_OK + '<span>Concluído! Download iniciado.</span>';
       resultadoLista.innerHTML = '';
@@ -569,7 +568,7 @@
 
       try {
         const zip = await JSZip.loadAsync(blob);
-        const entradas = Object.values(zip.files).filter(f => !f.dir && f.name !== NOME_RELATORIO);
+        const entradas = Object.values(zip.files).filter(f => !f.dir);
         for (const entrada of entradas) {
           const conteudo = await entrada.async('uint8array');
           const li = document.createElement('li');
@@ -577,14 +576,17 @@
           li.innerHTML = '<span class="nome">' + nome + '</span><span class="tamanho">' + formatarTamanho(conteudo.length) + '</span>';
           resultadoLista.appendChild(li);
         }
-
-        const relatorioEntrada = zip.file(NOME_RELATORIO);
-        if (relatorioEntrada) {
-          const texto = await relatorioEntrada.async('string');
-          renderizarResumoMetodo(JSON.parse(texto));
-        }
       } catch (e) {
         // Se não conseguir ler o zip no navegador, o download já aconteceu normalmente.
+      }
+
+      if (relatorioBase64) {
+        try {
+          const relatorio = JSON.parse(atob(relatorioBase64));
+          renderizarResumoMetodo(relatorio);
+        } catch (e) {
+          // Sem relatório disponível, sem problema — o zip já foi baixado.
+        }
       }
     }
 
@@ -667,8 +669,9 @@
 
         if (xhr.status >= 200 && xhr.status < 300) {
           const blob = xhr.response;
+          const relatorioBase64 = xhr.getResponseHeader('X-Relatorio-Classificacao');
           baixarBlob(blob, 'documentos-separados.zip');
-          await mostrarSucesso(blob);
+          await mostrarSucesso(blob, relatorioBase64);
         } else {
           const texto = await xhr.response.text().catch(() => '');
           mostrarErro(texto || ('Erro HTTP ' + xhr.status));

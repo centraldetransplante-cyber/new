@@ -2,6 +2,8 @@ package com.rafael.pdfsplitter;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 import org.jboss.resteasy.reactive.PartType;
 import org.jboss.resteasy.reactive.RestForm;
@@ -41,9 +43,14 @@ public class PdfSplitResource {
         }
 
         try (InputStream entrada = java.nio.file.Files.newInputStream(formulario.file.uploadedFile())) {
-            byte[] zip = service.separarEmZip(entrada);
-            return Response.ok(zip)
+            ResultadoSeparacao resultado = service.separar(entrada);
+            String relatorioBase64 = Base64.getEncoder()
+                    .encodeToString(resultado.relatorioJson().getBytes(StandardCharsets.UTF_8));
+
+            return Response.ok(resultado.zip())
                     .header("Content-Disposition", "attachment; filename=\"documentos-separados.zip\"")
+                    .header("X-Relatorio-Classificacao", relatorioBase64)
+                    .header("Access-Control-Expose-Headers", "X-Relatorio-Classificacao")
                     .build();
         }
     }
