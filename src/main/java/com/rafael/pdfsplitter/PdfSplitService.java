@@ -516,6 +516,10 @@ public class PdfSplitService {
      * categorias com muitas páginas escaneadas, ex.: exames.pdf), recomprime as imagens em qualidades JPEG cada
      * vez menores até caber no limite, parando na primeira que couber. Se nem a compressão mais forte for
      * suficiente, devolve o resultado mais comprimido mesmo assim (nunca descarta o arquivo).
+     *
+     * O documento é carregado UMA vez só e reaproveitado entre as tentativas de qualidade (em vez de recarregar e
+     * redecodificar tudo dos bytes originais a cada tentativa) — evita multiplicar o custo de CPU/memória por até
+     * 5x num PDF grande, que é justamente o caso que essa função existe para tratar.
      */
     private byte[] comprimirSePreciso(byte[] pdfOriginal, String nomeCategoria) {
         long limiteBytes = Math.max(1, config.tamanhoMaximoArquivoMb()) * 1024L * 1024L;
@@ -524,19 +528,24 @@ public class PdfSplitService {
         }
 
         byte[] melhorResultado = pdfOriginal;
-        for (float qualidade : QUALIDADES_COMPRESSAO) {
-            try {
-                byte[] comprimido = recomprimirImagens(pdfOriginal, qualidade);
-                melhorResultado = comprimido;
-                if (comprimido.length <= limiteBytes) {
-                    LOG.infof("%s.pdf comprimido de %d para %d bytes (qualidade JPEG %.2f) para caber no limite de %d MB",
-                            nomeCategoria, pdfOriginal.length, comprimido.length, qualidade, config.tamanhoMaximoArquivoMb());
-                    return comprimido;
+        try (PDDocument documento = Loader.loadPDF(pdfOriginal)) {
+            for (float qualidade : QUALIDADES_COMPRESSAO) {
+                for (PDPage pagina : documento.getPages()) {
+                    recomprimirImagensDosRecursos(documento, pagina.getResources(), qualidade);
                 }
-            } catch (IOException e) {
-                LOG.warn("Falha ao comprimir " + nomeCategoria + ".pdf, mantendo o melhor resultado obtido até agora", e);
-                break;
+                try (ByteArrayOutputStream saida = new ByteArrayOutputStream()) {
+                    documento.save(saida);
+                    byte[] comprimido = saida.toByteArray();
+                    melhorResultado = comprimido;
+                    if (comprimido.length <= limiteBytes) {
+                        LOG.infof("%s.pdf comprimido de %d para %d bytes (qualidade JPEG %.2f) para caber no limite de %d MB",
+                                nomeCategoria, pdfOriginal.length, comprimido.length, qualidade, config.tamanhoMaximoArquivoMb());
+                        return comprimido;
+                    }
+                }
             }
+        } catch (IOException e) {
+            LOG.warn("Falha ao comprimir " + nomeCategoria + ".pdf, mantendo o melhor resultado obtido até agora", e);
         }
         LOG.warnf("%s.pdf continua acima do limite de %d MB mesmo após compressão máxima (%d bytes)",
                 nomeCategoria, config.tamanhoMaximoArquivoMb(), melhorResultado.length);
@@ -545,22 +554,15 @@ public class PdfSplitService {
 
     private static final float[] QUALIDADES_COMPRESSAO = { 0.6f, 0.4f, 0.25f, 0.15f, 0.08f };
 
-    private byte[] recomprimirImagens(byte[] pdfOriginal, float qualidade) throws IOException {
-        try (PDDocument documento = Loader.loadPDF(pdfOriginal);
-                ByteArrayOutputStream saida = new ByteArrayOutputStream()) {
-            for (PDPage pagina : documento.getPages()) {
-                recomprimirImagensDosRecursos(documento, pagina.getResources(), qualidade);
-            }
-            documento.save(saida);
-            return saida.toByteArray();
-        }
-    }
-
     /**
-     * Percorre os XObjects de uma página (e, recursivamente, os de Form XObjects aninhados) recomprimindo cada
-     * imagem encontrada como JPEG na qualidade indicada. Substitui a imagem original no dicionário de recursos
-     * pelo mesmo nome — os operadores de conteúdo da página continuam apontando para o nome, então não é preciso
-     * reescrever o conteúdo da página, só o recurso.
+     * Percorre os XObjects de uma página (e, recursivamente, os de Form XObjects aninhados) tentando recomprimir
+     * cada imagem como JPEG na qualidade indicada. Substitui a imagem original no dicionário de recursos pelo
+     * mesmo nome — os operadores de conteúdo da página continuam apontando para o nome, então não é preciso
+     * reescrever o conteúdo da página, só o recurso — mas SÓ substitui quando o resultado é realmente menor e a
+     * imagem não tem máscara de transparência (SMask): uma página escaneada em preto-e-branco costuma vir
+     * comprimida como CCITT G4/JBIG2, que já é mais compacto que JPEG para esse tipo de conteúdo (texto/linhas
+     * nítidas) — reencodar como JPEG pode AUMENTAR o tamanho; e recriar a imagem via JPEGFactory perde qualquer
+     * SMask, o que mudaria a aparência visual de uma imagem com transparência.
      */
     private void recomprimirImagensDosRecursos(PDDocument documento, PDResources recursos, float qualidade) throws IOException {
         if (recursos == null) {
@@ -578,9 +580,14 @@ public class PdfSplitService {
             PDXObject xobject = recursos.getXObject(nome);
             if (xobject instanceof PDImageXObject imagemOriginal) {
                 try {
+                    if (imagemOriginal.getSoftMask() != null) {
+                        continue;
+                    }
+                    long tamanhoOriginal = imagemOriginal.getCOSObject().getLength();
                     BufferedImage imagem = imagemOriginal.getImage();
                     PDImageXObject imagemComprimida = JPEGFactory.createFromImage(documento, imagem, qualidade);
-                    if (dicionarioXObjects != null) {
+                    long tamanhoComprimido = imagemComprimida.getCOSObject().getLength();
+                    if (dicionarioXObjects != null && tamanhoComprimido < tamanhoOriginal) {
                         dicionarioXObjects.setItem(nome, imagemComprimida.getCOSObject());
                     }
                 } catch (Exception e) {
