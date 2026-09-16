@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -16,6 +17,7 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.text.PDFTextStripper;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rafael.pdfsplitter.gemini.GeminiClassificadorService;
 
 import jakarta.enterprise.context.ApplicationScoped;
@@ -23,31 +25,39 @@ import jakarta.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public class PdfSplitService {
 
+    /** Nome do arquivo de relatório embutido no zip com o método de classificação usado por página. */
+    public static final String NOME_RELATORIO = "_relatorio-classificacao.json";
+
     private final ClassificadorConfig config;
     private final GeminiClassificadorService geminiService;
+    private final ObjectMapper objectMapper;
 
-    public PdfSplitService(ClassificadorConfig config, GeminiClassificadorService geminiService) {
+    public PdfSplitService(ClassificadorConfig config, GeminiClassificadorService geminiService, ObjectMapper objectMapper) {
         this.config = config;
         this.geminiService = geminiService;
+        this.objectMapper = objectMapper;
     }
 
     /**
      * Lê o PDF de entrada, classifica cada página e devolve um .zip (em memória)
      * com um único PDF por categoria (sem pastas), juntando todas as páginas
-     * daquela categoria na ordem em que aparecem no documento original.
+     * daquela categoria na ordem em que aparecem no documento original, além de
+     * um relatório ({@value #NOME_RELATORIO}) dizendo se cada página foi
+     * classificada pelo Gemini, por palavra-chave (fallback) ou pela regra de
+     * bloco do TFD/RS.
      */
     public byte[] separarEmZip(InputStream pdfInputStream) throws IOException {
         try (PDDocument origem = Loader.loadPDF(pdfInputStream.readAllBytes())) {
-            List<Categoria> categoriaPorPagina = classificarPaginas(origem);
-            estenderBlocosTfdRs(categoriaPorPagina);
-            Map<Categoria, List<Integer>> paginasPorCategoria = agruparPorCategoria(categoriaPorPagina);
-            return montarZip(origem, paginasPorCategoria);
+            List<PaginaClassificada> classificacoes = classificarPaginas(origem);
+            estenderBlocosTfdRs(classificacoes);
+            Map<Categoria, List<Integer>> paginasPorCategoria = agruparPorCategoria(classificacoes);
+            return montarZip(origem, paginasPorCategoria, classificacoes);
         }
     }
 
-    private List<Categoria> classificarPaginas(PDDocument documento) throws IOException {
+    private List<PaginaClassificada> classificarPaginas(PDDocument documento) throws IOException {
         int totalPaginas = documento.getNumberOfPages();
-        List<Categoria> resultado = new ArrayList<>(totalPaginas);
+        List<PaginaClassificada> resultado = new ArrayList<>(totalPaginas);
         PDFTextStripper stripper = new PDFTextStripper();
 
         for (int pagina = 1; pagina <= totalPaginas; pagina++) {
@@ -59,12 +69,13 @@ public class PdfSplitService {
         return resultado;
     }
 
-    private Categoria classificarTexto(String textoOriginal) {
+    private PaginaClassificada classificarTexto(String textoOriginal) {
         Categoria viaIa = geminiService.classificar(textoOriginal);
         if (viaIa != null) {
-            return viaIa;
+            return new PaginaClassificada(viaIa, MetodoClassificacao.GEMINI);
         }
-        return classificarPorPalavraChave(normalizar(textoOriginal));
+        Categoria viaPalavraChave = classificarPorPalavraChave(normalizar(textoOriginal));
+        return new PaginaClassificada(viaPalavraChave, MetodoClassificacao.PALAVRA_CHAVE);
     }
 
     private Categoria classificarPorPalavraChave(String textoNormalizado) {
@@ -106,12 +117,18 @@ public class PdfSplitService {
      * as páginas seguintes do mesmo bloco costumam ser continuação sem texto
      * identificável. Ao detectar o gatilho, as próximas páginas até completar o
      * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) também
-     * são marcadas como TFD/RS, mesmo sem palavra-chave própria.
+     * são marcadas como TFD/RS, mesmo sem palavra-chave própria — o método
+     * registrado para essas páginas é REGRA_BLOCO_TFD_RS, não a classificação
+     * real (Gemini/palavra-chave) que elas teriam recebido isoladamente.
      */
-    private void estenderBlocosTfdRs(List<Categoria> categoriaPorPagina) {
-        List<Categoria> original = new ArrayList<>(categoriaPorPagina);
+    private void estenderBlocosTfdRs(List<PaginaClassificada> classificacoes) {
+        List<Categoria> original = new ArrayList<>();
+        for (PaginaClassificada p : classificacoes) {
+            original.add(p.getCategoria());
+        }
+
         int tamanhoBloco = Math.max(1, config.tfdRsPaginasPorBloco());
-        int totalPaginas = categoriaPorPagina.size();
+        int totalPaginas = classificacoes.size();
 
         for (int i = 0; i < totalPaginas; i++) {
             if (original.get(i) != Categoria.TFD_RS) {
@@ -119,22 +136,24 @@ public class PdfSplitService {
             }
             int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
             for (int j = i + 1; j < fimBloco; j++) {
-                categoriaPorPagina.set(j, Categoria.TFD_RS);
+                classificacoes.get(j).setCategoria(Categoria.TFD_RS);
+                classificacoes.get(j).setMetodo(MetodoClassificacao.REGRA_BLOCO_TFD_RS);
             }
         }
     }
 
-    private Map<Categoria, List<Integer>> agruparPorCategoria(List<Categoria> categoriaPorPagina) {
+    private Map<Categoria, List<Integer>> agruparPorCategoria(List<PaginaClassificada> classificacoes) {
         Map<Categoria, List<Integer>> paginasPorCategoria = new EnumMap<>(Categoria.class);
-        for (int pagina = 0; pagina < categoriaPorPagina.size(); pagina++) {
+        for (int pagina = 0; pagina < classificacoes.size(); pagina++) {
             paginasPorCategoria
-                    .computeIfAbsent(categoriaPorPagina.get(pagina), c -> new ArrayList<>())
+                    .computeIfAbsent(classificacoes.get(pagina).getCategoria(), c -> new ArrayList<>())
                     .add(pagina);
         }
         return paginasPorCategoria;
     }
 
-    private byte[] montarZip(PDDocument origem, Map<Categoria, List<Integer>> paginasPorCategoria) throws IOException {
+    private byte[] montarZip(PDDocument origem, Map<Categoria, List<Integer>> paginasPorCategoria,
+            List<PaginaClassificada> classificacoes) throws IOException {
         ByteArrayOutputStream zipBytes = new ByteArrayOutputStream();
 
         try (ZipOutputStream zip = new ZipOutputStream(zipBytes)) {
@@ -151,8 +170,38 @@ public class PdfSplitService {
                 zip.write(pdfDaCategoria);
                 zip.closeEntry();
             }
+
+            zip.putNextEntry(new ZipEntry(NOME_RELATORIO));
+            zip.write(gerarRelatorioJson(classificacoes));
+            zip.closeEntry();
         }
         return zipBytes.toByteArray();
+    }
+
+    private byte[] gerarRelatorioJson(List<PaginaClassificada> classificacoes) throws IOException {
+        List<Map<String, Object>> paginas = new ArrayList<>();
+        Map<String, Integer> resumo = new LinkedHashMap<>();
+        for (MetodoClassificacao metodo : MetodoClassificacao.values()) {
+            resumo.put(metodo.name(), 0);
+        }
+
+        for (int i = 0; i < classificacoes.size(); i++) {
+            PaginaClassificada p = classificacoes.get(i);
+            Map<String, Object> entrada = new LinkedHashMap<>();
+            entrada.put("pagina", i + 1);
+            entrada.put("categoria", p.getCategoria().getPastaSaida());
+            entrada.put("metodo", p.getMetodo().name());
+            paginas.add(entrada);
+
+            resumo.merge(p.getMetodo().name(), 1, Integer::sum);
+        }
+
+        Map<String, Object> relatorio = new LinkedHashMap<>();
+        relatorio.put("totalPaginas", classificacoes.size());
+        relatorio.put("resumoPorMetodo", resumo);
+        relatorio.put("paginas", paginas);
+
+        return objectMapper.writeValueAsBytes(relatorio);
     }
 
     private byte[] extrairPaginas(PDDocument origem, List<Integer> paginas) throws IOException {

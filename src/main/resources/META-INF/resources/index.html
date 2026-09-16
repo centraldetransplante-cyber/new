@@ -298,6 +298,65 @@
   .resultado-lista .tamanho { color: var(--text-muted); }
   .resultado-erro-msg { margin-top: 6px; font-size: .85rem; color: var(--text-muted); }
 
+  .metodo-resumo {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border);
+  }
+  .metodo-resumo-titulo {
+    font-size: .78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .metodo-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .metodo-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .8rem;
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+  }
+  .metodo-badge .ponto { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .metodo-badge.gemini .ponto { background: #8b5cf6; }
+  .metodo-badge.palavra-chave .ponto { background: #f59e0b; }
+  .metodo-badge.regra-bloco .ponto { background: #06b6d4; }
+
+  .metodo-detalhe {
+    margin-top: 10px;
+    font-size: .78rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .metodo-paginas {
+    margin-top: 8px;
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    font-size: .78rem;
+  }
+  .metodo-paginas.aberto { display: flex; }
+  .metodo-paginas div {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .metodo-paginas .pagina-metodo { display: inline-flex; align-items: center; gap: 5px; }
+  .metodo-paginas .ponto { width: 6px; height: 6px; border-radius: 50%; }
+
   footer {
     text-align: center;
     margin-top: 24px;
@@ -362,6 +421,13 @@
         <div class="resultado-titulo" id="resultadoTitulo"></div>
         <ul class="resultado-lista" id="resultadoLista"></ul>
         <div class="resultado-erro-msg" id="resultadoErroMsg"></div>
+
+        <div class="metodo-resumo" id="metodoResumo" style="display:none">
+          <div class="metodo-resumo-titulo">Como cada página foi classificada</div>
+          <div class="metodo-badges" id="metodoBadges"></div>
+          <div class="metodo-detalhe" id="metodoDetalheToggle">Ver por página ▾</div>
+          <div class="metodo-paginas" id="metodoPaginas"></div>
+        </div>
       </div>
     </div>
 
@@ -384,6 +450,22 @@
     const resultadoTitulo = document.getElementById('resultadoTitulo');
     const resultadoLista = document.getElementById('resultadoLista');
     const resultadoErroMsg = document.getElementById('resultadoErroMsg');
+    const metodoResumo = document.getElementById('metodoResumo');
+    const metodoBadges = document.getElementById('metodoBadges');
+    const metodoDetalheToggle = document.getElementById('metodoDetalheToggle');
+    const metodoPaginas = document.getElementById('metodoPaginas');
+
+    const NOME_RELATORIO = '_relatorio-classificacao.json';
+    const INFO_METODO = {
+      GEMINI: { classe: 'gemini', cor: '#8b5cf6', rotulo: 'Gemini (IA)' },
+      PALAVRA_CHAVE: { classe: 'palavra-chave', cor: '#f59e0b', rotulo: 'Palavra-chave (fallback)' },
+      REGRA_BLOCO_TFD_RS: { classe: 'regra-bloco', cor: '#06b6d4', rotulo: 'Regra de bloco TFD/RS' }
+    };
+
+    metodoDetalheToggle.addEventListener('click', () => {
+      const aberto = metodoPaginas.classList.toggle('aberto');
+      metodoDetalheToggle.textContent = aberto ? 'Ver por página ▴' : 'Ver por página ▾';
+    });
 
     const ICONE_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     const ICONE_ERRO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg>';
@@ -443,20 +525,63 @@
       resultadoErroMsg.textContent = mensagem;
     }
 
+    function renderizarResumoMetodo(relatorio) {
+      metodoBadges.innerHTML = '';
+      metodoPaginas.innerHTML = '';
+
+      const resumo = relatorio.resumoPorMetodo || {};
+      const algumUsado = Object.values(resumo).some(v => v > 0);
+      if (!algumUsado) {
+        metodoResumo.style.display = 'none';
+        return;
+      }
+
+      Object.keys(INFO_METODO).forEach((chave) => {
+        const qtd = resumo[chave] || 0;
+        if (qtd === 0) return;
+        const info = INFO_METODO[chave];
+        const badge = document.createElement('span');
+        badge.className = 'metodo-badge ' + info.classe;
+        badge.innerHTML = '<span class="ponto"></span>' + info.rotulo + ': ' + qtd + (qtd === 1 ? ' página' : ' páginas');
+        metodoBadges.appendChild(badge);
+      });
+
+      (relatorio.paginas || []).forEach((p) => {
+        const info = INFO_METODO[p.metodo] || { classe: '', rotulo: p.metodo };
+        const linha = document.createElement('div');
+        const categoria = (p.categoria || '').replace(/_/g, ' ');
+        linha.innerHTML =
+          '<span>Página ' + p.pagina + ' &rarr; <strong style="text-transform:capitalize">' + categoria + '</strong></span>' +
+          '<span class="pagina-metodo"><span class="ponto" style="background:' + (info.cor || '#999') + '"></span>' + info.rotulo + '</span>';
+        metodoPaginas.appendChild(linha);
+      });
+
+      metodoResumo.style.display = 'block';
+    }
+
     async function mostrarSucesso(blob) {
       resultado.className = 'resultado ok ativo';
       resultadoTitulo.innerHTML = ICONE_OK + '<span>Concluído! Download iniciado.</span>';
       resultadoLista.innerHTML = '';
+      metodoResumo.style.display = 'none';
+      metodoPaginas.classList.remove('aberto');
+      metodoDetalheToggle.textContent = 'Ver por página ▾';
 
       try {
         const zip = await JSZip.loadAsync(blob);
-        const entradas = Object.values(zip.files).filter(f => !f.dir);
+        const entradas = Object.values(zip.files).filter(f => !f.dir && f.name !== NOME_RELATORIO);
         for (const entrada of entradas) {
           const conteudo = await entrada.async('uint8array');
           const li = document.createElement('li');
           const nome = entrada.name.replace(/\.pdf$/i, '').replace(/_/g, ' ');
           li.innerHTML = '<span class="nome">' + nome + '</span><span class="tamanho">' + formatarTamanho(conteudo.length) + '</span>';
           resultadoLista.appendChild(li);
+        }
+
+        const relatorioEntrada = zip.file(NOME_RELATORIO);
+        if (relatorioEntrada) {
+          const texto = await relatorioEntrada.async('string');
+          renderizarResumoMetodo(JSON.parse(texto));
         }
       } catch (e) {
         // Se não conseguir ler o zip no navegador, o download já aconteceu normalmente.
