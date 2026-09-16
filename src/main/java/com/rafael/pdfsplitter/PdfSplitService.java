@@ -120,16 +120,18 @@ public class PdfSplitService {
     }
 
     /**
-     * Normalmente só a 1ª página de um documento de TFD (RS ou de outro estado)
-     * contém as palavras-chave; as páginas seguintes do mesmo bloco costumam
-     * ser continuação sem texto identificável (caem em OUTROS na classificação
-     * isolada). Ao detectar o gatilho, as próximas páginas até completar o
-     * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) também
-     * entram na MESMA categoria do gatilho (TFD_RS continua TFD_RS, TFD de
-     * outro estado continua TFD_OUTROS_ESTADOS) — mas SOMENTE se elas não
-     * tiverem sido classificadas como algo próprio (OUTROS). Uma página que já
-     * foi identificada como outra categoria (por IA ou palavra-chave) significa
-     * que um novo documento começou ali, então essa regra não a sobrescreve.
+     * Um pedido de TFD (RS ou de outro estado) quase sempre ocupa um bloco de
+     * páginas em sequência (capa do formulário + anexos que acompanham o
+     * pedido, como documentos pessoais e exames que justificam a solicitação).
+     * Só a 1ª página do bloco costuma trazer as palavras-chave do formulário;
+     * as seguintes podem até ser classificadas como DOCUMENTOS, EXAMES etc.
+     * isoladamente, mas continuam fazendo parte do MESMO pedido de TFD.
+     *
+     * Por isso, ao detectar o gatilho, as próximas páginas até completar o
+     * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) entram
+     * na mesma categoria do gatilho — EXCETO se uma delas for, ela mesma, o
+     * início de OUTRO pedido de TFD (RS ou de outro estado), o que indica que
+     * um novo bloco está começando ali e não deve ser absorvido pelo anterior.
      */
     private void estenderBlocosTfd(List<PaginaClassificada> classificacoes) {
         List<Categoria> original = new ArrayList<>();
@@ -147,9 +149,9 @@ public class PdfSplitService {
             }
             int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
             for (int j = i + 1; j < fimBloco; j++) {
-                if (original.get(j) != Categoria.OUTROS) {
-                    // Página já tem classificação própria (ex: começo de outro
-                    // documento) — não faz parte do bloco, para de estender.
+                if (CATEGORIAS_TFD.contains(original.get(j))) {
+                    // Um novo pedido de TFD começa aqui (mesmo que seja outro
+                    // estado) — não faz parte do bloco anterior, para de estender.
                     break;
                 }
                 classificacoes.get(j).setCategoria(categoriaDoBloco);
