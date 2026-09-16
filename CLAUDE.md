@@ -85,10 +85,18 @@ locally instead of falling back to keywords.
    than `tfd-outros-estados`.
 
    `TFD_RS` vs `TFD_OUTROS_ESTADOS` is itself a hard business requirement, not a nice-to-have: TFD/RS means
-   *specifically* Rio Grande do Sul's own form (identified by its literal header text — "CENTRAL ESTADUAL DE
-   TRANSPLANTES", "DEPARTAMENTO DE REGULAÇÃO ESTADUAL", "Solicitação de cadastro para consulta -TFD" — see
-   `classificador.tfd-rs`). TFD requests from any other state must land in `TFD_OUTROS_ESTADOS` instead, never be
-   merged into `TFD_RS`.
+   *specifically* Rio Grande do Sul's own form. The keyword fallback (`classificarPorPalavraChave`) requires BOTH a
+   generic TFD term (`classificador.tfd-termo-generico`) AND an RS marker (`classificador.tfd-rs-marcador`) on the
+   same page to call it TFD_RS — an RS marker alone (e.g. "central estadual de transplantes", which shows up in this
+   org's own non-TFD correspondence since they *are* a transplant center) is deliberately not enough. `deveInterromperBloco`
+   also treats a page independently classified as the *other* TFD category as an unconditional block break, even if
+   Gemini calls it CONTINUACAO — the two must never merge.
+
+   Two more edge cases handled in `estenderBlocosTfd`: `puxarCapaParaTras` pulls preceding `OUTROS` pages backward into
+   the block when the trigger page itself is marked CONTINUACAO (the real cover likely has no extractable text and
+   landed in OUTROS); and `deveInterromperBloco` also breaks the block on a *non-TFD* page that Gemini explicitly
+   marks INICIO (previously only TFD-classified pages could break a block, so a short 1-2 page TFD request would
+   swallow the start of the next real document).
 
 3. **Grouping + zip assembly** (`agruparPorCategoria`, `montarZip`): pages are grouped by final category (in
    `Categoria` enum order) and each group becomes one merged PDF named `<categoria>.pdf` inside a flat zip (no
@@ -98,7 +106,28 @@ locally instead of falling back to keywords.
    totals per method) and it's returned to the client as base64 in the `X-Relatorio-Classificacao` response header
    — deliberately NOT embedded as a file inside the zip (also an explicit requirement: the zip should contain only
    the category PDFs). The frontend (`index.html`) decodes that header to render the "how was each page classified"
-   summary after a successful upload.
+   summary after a successful upload. The per-page detail list is capped at 500 entries (`paginasTruncadas: true` when
+   cut) so a very large PDF can't blow past a proxy's header-size limit and silently drop the whole report; the
+   per-method totals always cover every page regardless of the cap.
+
+## Other things worth knowing
+
+- **Gemini calls run in parallel, one call per page**, via a small fixed thread pool (`classificarPaginas` in
+  `PdfSplitService`, capped at 8 concurrent) — text extraction (PDFBox) still happens sequentially first since it's
+  fast and not thread-safety-tested for concurrent access. Each Gemini call also retries once on failure before
+  falling back to keywords (`GeminiClassificadorService.classificar`, `MAX_TENTATIVAS`).
+- **Pages with no extractable text** (scanned image with no OCR layer) skip the Gemini call entirely — there's
+  nothing to send — and are tagged `MetodoClassificacao.SEM_TEXTO` in the report instead of silently landing in
+  `outros.pdf` with no indication anything went wrong.
+- **Invalid input PDFs** (corrupt, password-protected, zero pages) throw `PdfInvalidoException` from
+  `PdfSplitService.separar`, which `PdfSplitResource` turns into an HTTP 400 with a Portuguese message instead of a
+  raw 500 stack trace.
+- **The uploaded PDF is read directly from Quarkus's temp upload file** (`formulario.file.uploadedFile().toFile()`
+  passed straight to `Loader.loadPDF(File)`), not buffered into a byte array first — matters on Render's free tier,
+  which is memory-constrained.
+- **The source PDF's AcroForm is flattened** (`achatarFormulario`) before splitting, so a digitally-filled form (e.g.
+  a TFD form filled on a computer, not printed/scanned) doesn't come out with blank-looking fields in the split PDF
+  — `importPage` copies page content but not form field values on its own.
 
 ## Adding a new category
 

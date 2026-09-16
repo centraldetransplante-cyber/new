@@ -1,10 +1,10 @@
 package com.rafael.pdfsplitter;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
+import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.PartType;
 import org.jboss.resteasy.reactive.RestForm;
 import org.jboss.resteasy.reactive.multipart.FileUpload;
@@ -18,6 +18,8 @@ import jakarta.ws.rs.core.Response;
 
 @Path("/pdf-splitter")
 public class PdfSplitResource {
+
+    private static final Logger LOG = Logger.getLogger(PdfSplitResource.class);
 
     private final PdfSplitService service;
 
@@ -35,15 +37,13 @@ public class PdfSplitResource {
     @Path("/split")
     @Consumes(MediaType.MULTIPART_FORM_DATA)
     @Produces("application/zip")
-    public Response separar(Formulario formulario) throws IOException {
+    public Response separar(Formulario formulario) {
         if (formulario.file == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity("Envie o PDF no campo 'file' (multipart/form-data).")
-                    .build();
+            return erro(Response.Status.BAD_REQUEST, "Envie o PDF no campo 'file' (multipart/form-data).");
         }
 
-        try (InputStream entrada = java.nio.file.Files.newInputStream(formulario.file.uploadedFile())) {
-            ResultadoSeparacao resultado = service.separar(entrada);
+        try {
+            ResultadoSeparacao resultado = service.separar(formulario.file.uploadedFile().toFile());
             String relatorioBase64 = Base64.getEncoder()
                     .encodeToString(resultado.relatorioJson().getBytes(StandardCharsets.UTF_8));
 
@@ -52,6 +52,20 @@ public class PdfSplitResource {
                     .header("X-Relatorio-Classificacao", relatorioBase64)
                     .header("Access-Control-Expose-Headers", "X-Relatorio-Classificacao")
                     .build();
+        } catch (PdfInvalidoException e) {
+            return erro(Response.Status.BAD_REQUEST, e.getMessage());
+        } catch (IOException e) {
+            LOG.error("Falha ao processar PDF enviado", e);
+            return erro(Response.Status.INTERNAL_SERVER_ERROR,
+                    "Não foi possível processar o PDF. Tente novamente em instantes.");
+        } catch (Exception e) {
+            LOG.error("Erro inesperado ao separar PDF", e);
+            return erro(Response.Status.INTERNAL_SERVER_ERROR,
+                    "Erro inesperado ao processar o PDF. Tente novamente em instantes.");
         }
+    }
+
+    private Response erro(Response.Status status, String mensagem) {
+        return Response.status(status).entity(mensagem).type(MediaType.TEXT_PLAIN).build();
     }
 }

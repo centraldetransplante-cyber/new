@@ -29,25 +29,41 @@ public class GeminiClassificadorService {
         return config.apiKey() != null && !config.apiKey().isBlank();
     }
 
+    private static final int MAX_TENTATIVAS = 2;
+
     /**
      * Pede ao Gemini para classificar o texto de uma página em uma das
      * categorias suportadas e, junto, dizer se a página é o INÍCIO de um
-     * documento ou a CONTINUAÇÃO do documento anterior. Retorna null se a
-     * chamada falhar (ex: sem rede, quota, resposta inesperada) para que o
+     * documento ou a CONTINUAÇÃO do documento anterior. Tenta até
+     * {@value #MAX_TENTATIVAS} vezes (erros de rede/429 costumam ser
+     * passageiros). Retorna null se todas as tentativas falharem, para que o
      * chamador use o fallback por palavra-chave.
      */
     public ClassificacaoIa classificar(String textoPagina) {
         if (!disponivel()) {
             return null;
         }
-        try {
-            String prompt = montarPrompt(textoPagina);
-            GeminiResponse resposta = client.gerarConteudo(config.modelo(), config.apiKey(), GeminiRequest.deTexto(prompt));
-            return interpretarResposta(resposta.primeiroTexto());
-        } catch (Exception e) {
-            LOG.warn("Falha ao classificar página com Gemini, usando fallback por palavra-chave", e);
-            return null;
+        String prompt = montarPrompt(textoPagina);
+        for (int tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+            try {
+                GeminiResponse resposta = client.gerarConteudo(config.modelo(), config.apiKey(), GeminiRequest.deTexto(prompt));
+                return interpretarResposta(resposta.primeiroTexto());
+            } catch (Exception e) {
+                if (tentativa == MAX_TENTATIVAS) {
+                    LOG.warn("Falha ao classificar página com Gemini após " + MAX_TENTATIVAS
+                            + " tentativa(s), usando fallback por palavra-chave", e);
+                    return null;
+                }
+                LOG.debug("Falha ao classificar página com Gemini, tentando novamente", e);
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
         }
+        return null;
     }
 
     private String montarPrompt(String textoPagina) {
@@ -107,7 +123,13 @@ public class GeminiClassificadorService {
         if (texto == null) {
             return null;
         }
-        String limpo = texto.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z_|]", "");
+        // Espaco/hifen viram "_" ANTES de descartar o resto, senao uma resposta
+        // como "TFD OUTROS ESTADOS|INICIO" perde os espacos e vira
+        // "TFDOUTROSESTADOS", que nao bate com nenhum nome de categoria (o
+        // enum usa "_") e a resposta inteira era descartada a toa.
+        String limpo = texto.trim().toUpperCase(Locale.ROOT)
+                .replaceAll("[\\s-]+", "_")
+                .replaceAll("[^A-Z_|]", "");
 
         String parteCategoria = limpo;
         // Sem o separador, procura o marcador no texto inteiro (nenhum nome de

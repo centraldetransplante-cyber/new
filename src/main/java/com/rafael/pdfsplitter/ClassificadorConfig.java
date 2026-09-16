@@ -14,11 +14,22 @@ import io.smallrye.config.WithDefault;
 @ConfigMapping(prefix = "classificador")
 public interface ClassificadorConfig {
 
-    /** Termos que só aparecem no formulário de TFD do Rio Grande do Sul (RS). */
-    List<String> tfdRs();
+    /**
+     * Termos que indicam Rio Grande do Sul (RS) — órgão emissor, secretaria,
+     * "tfd/rs" etc. SOZINHOS não bastam para virar TFD_RS (ex.: "central
+     * estadual de transplantes" também aparece em ofícios/laudos que nada têm
+     * a ver com TFD); precisam aparecer JUNTO com um termo de
+     * {@link #tfdTermoGenerico()} na mesma página. Ver {@code classificador.tfd-rs-marcador}.
+     */
+    List<String> tfdRsMarcador();
 
-    /** Termos genéricos de TFD que não identificam o Rio Grande do Sul (outros estados). */
-    List<String> tfdOutrosEstados();
+    /**
+     * Termos que indicam, de forma genérica, que a página é sobre TFD (sem
+     * indicar de qual estado). Página que bate aqui E em
+     * {@link #tfdRsMarcador()} é TFD_RS; que bate só aqui é TFD_OUTROS_ESTADOS;
+     * que bate só no marcador do RS (sem termo de TFD) NÃO é TFD.
+     */
+    List<String> tfdTermoGenerico();
 
     List<String> protocoloEncaminhamento();
 

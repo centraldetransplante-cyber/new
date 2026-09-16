@@ -1,8 +1,8 @@
 package com.rafael.pdfsplitter;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -11,13 +11,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
+import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.jboss.logging.Logger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rafael.pdfsplitter.gemini.ClassificacaoIa;
@@ -28,8 +37,16 @@ import jakarta.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public class PdfSplitService {
 
+    private static final Logger LOG = Logger.getLogger(PdfSplitService.class);
+
     /** Categorias de TFD que seguem a regra de bloco (capa fixa + páginas de continuação sem texto). */
     private static final Set<Categoria> CATEGORIAS_TFD = EnumSet.of(Categoria.TFD_RS, Categoria.TFD_OUTROS_ESTADOS);
+
+    /** Limite de páginas detalhadas no relatório (o cabeçalho HTTP não pode crescer sem limite). */
+    private static final int LIMITE_PAGINAS_NO_RELATORIO = 500;
+
+    /** Tamanho máximo do pool usado para paralelizar as chamadas ao Gemini (uma por página). */
+    private static final int MAX_PARALELISMO_CLASSIFICACAO = 8;
 
     private final ClassificadorConfig config;
     private final GeminiClassificadorService geminiService;
@@ -42,15 +59,33 @@ public class PdfSplitService {
     }
 
     /**
-     * Lê o PDF de entrada, classifica cada página e devolve um .zip (em memória)
-     * com um único PDF por categoria (sem pastas), juntando todas as páginas
-     * daquela categoria na ordem em que aparecem no documento original, além de
-     * um relatório em JSON dizendo se cada página foi classificada pelo Gemini,
-     * por palavra-chave (fallback) ou pela regra de bloco do TFD/RS — esse
-     * relatório não entra no zip, é devolvido à parte para a UI exibir.
+     * Lê o PDF de entrada (direto do arquivo temporário do upload, sem
+     * carregar tudo em memória duas vezes), classifica cada página e devolve
+     * um .zip (em memória) com um único PDF por categoria (sem pastas),
+     * juntando todas as páginas daquela categoria na ordem em que aparecem no
+     * documento original, além de um relatório em JSON dizendo como cada
+     * página foi classificada — esse relatório não entra no zip, é devolvido
+     * à parte para a UI exibir.
+     *
+     * @throws PdfInvalidoException se o arquivo não for um PDF válido, estiver
+     *         protegido por senha ou não tiver páginas.
      */
-    public ResultadoSeparacao separar(InputStream pdfInputStream) throws IOException {
-        try (PDDocument origem = Loader.loadPDF(pdfInputStream.readAllBytes())) {
+    public ResultadoSeparacao separar(File arquivoPdf) throws IOException {
+        PDDocument origem;
+        try {
+            origem = Loader.loadPDF(arquivoPdf);
+        } catch (InvalidPasswordException e) {
+            throw new PdfInvalidoException("O PDF está protegido por senha. Remova a senha e envie novamente.", e);
+        } catch (IOException e) {
+            throw new PdfInvalidoException("O arquivo enviado não é um PDF válido ou está corrompido.", e);
+        }
+
+        try (origem) {
+            if (origem.getNumberOfPages() == 0) {
+                throw new PdfInvalidoException("O PDF enviado não tem páginas.");
+            }
+            achatarFormulario(origem);
+
             List<PaginaClassificada> classificacoes = classificarPaginas(origem);
             estenderBlocosTfd(classificacoes);
             Map<Categoria, List<Integer>> paginasPorCategoria = agruparPorCategoria(classificacoes);
@@ -60,23 +95,75 @@ public class PdfSplitService {
         }
     }
 
+    /**
+     * Achata (flatten) os campos de formulário (AcroForm) do PDF de origem
+     * antes de separar as páginas. Sem isso, um formulário de TFD preenchido
+     * eletronicamente (e não "achatado" na origem) pode sair com os campos em
+     * branco no PDF separado, porque {@code importPage} copia o conteúdo da
+     * página mas não o valor dos campos do formulário. Não é um erro fatal se
+     * falhar — só um risco visual a menos coberto.
+     */
+    private void achatarFormulario(PDDocument documento) {
+        try {
+            PDAcroForm acroForm = documento.getDocumentCatalog().getAcroForm();
+            if (acroForm != null) {
+                acroForm.flatten();
+            }
+        } catch (Exception e) {
+            LOG.warn("Falha ao achatar formulário (AcroForm) do PDF de origem — campos podem sair em branco nas páginas separadas", e);
+        }
+    }
+
+    /**
+     * Extrai o texto de cada página (sequencial, é CPU local) e depois
+     * classifica em paralelo (as chamadas ao Gemini são I/O de rede — um PDF
+     * de 50 páginas em série podia passar de vários minutos e esbarrar em
+     * timeout do navegador/proxy).
+     */
     private List<PaginaClassificada> classificarPaginas(PDDocument documento) throws IOException {
         int totalPaginas = documento.getNumberOfPages();
-        List<PaginaClassificada> resultado = new ArrayList<>(totalPaginas);
+        List<String> textos = new ArrayList<>(totalPaginas);
         PDFTextStripper stripper = new PDFTextStripper();
 
         for (int pagina = 1; pagina <= totalPaginas; pagina++) {
             stripper.setStartPage(pagina);
             stripper.setEndPage(pagina);
-            String textoOriginal = stripper.getText(documento);
-            resultado.add(classificarTexto(textoOriginal));
+            textos.add(stripper.getText(documento));
         }
-        return resultado;
+
+        int paralelismo = Math.max(1, Math.min(MAX_PARALELISMO_CLASSIFICACAO, totalPaginas));
+        ExecutorService executor = Executors.newFixedThreadPool(paralelismo);
+        try {
+            List<Future<PaginaClassificada>> futuros = new ArrayList<>(totalPaginas);
+            for (String texto : textos) {
+                Callable<PaginaClassificada> tarefa = () -> classificarTexto(texto);
+                futuros.add(executor.submit(tarefa));
+            }
+
+            List<PaginaClassificada> resultado = new ArrayList<>(totalPaginas);
+            for (Future<PaginaClassificada> futuro : futuros) {
+                try {
+                    resultado.add(futuro.get());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Classificação interrompida", e);
+                } catch (ExecutionException e) {
+                    throw new IOException("Falha ao classificar página", e.getCause());
+                }
+            }
+            return resultado;
+        } finally {
+            executor.shutdown();
+        }
     }
 
     /**
      * Classifica uma página: o Gemini decide, e só caímos para a lista de
-     * palavras-chave quando ele falha (sem rede, quota, resposta inválida).
+     * palavras-chave quando ele falha (sem rede, quota, resposta inválida) —
+     * ou quando ele responde OUTROS (ver exceção abaixo). Página sem texto
+     * extraível (digitalização sem OCR) nem chega a ser mandada pro Gemini:
+     * não há o que analisar, e gastar uma chamada nisso só atrasa e consome
+     * cota à toa.
      *
      * Exceção: quando o Gemini responde OUTROS. Esse é o "balde" que engolia
      * páginas que a lista de palavras-chave reconheceria sem dúvida (RG, CPF,
@@ -84,17 +171,25 @@ public class PdfSplitService {
      * SUS, encaminhamento...), fazendo documentos saírem dentro de outros.pdf.
      * Nesse caso — e SÓ nesse — conferimos o texto contra as palavras-chave; se
      * elas apontarem uma categoria real, ela prevalece sobre o OUTROS do
-     * Gemini. O método registrado passa a ser PALAVRA_CHAVE, porque foi de fato
-     * a lista que decidiu a categoria final. O sinal de início/continuação do
-     * Gemini é preservado (ele não depende da categoria).
+     * Gemini. A rede de segurança NUNCA promove para uma categoria de TFD:
+     * uma página solta cujo texto corrido só menciona "TFD" de passagem (uma
+     * carta, um aviso) não pode virar gatilho de bloco e arrastar as 2
+     * páginas vizinhas pro lugar errado. O método registrado passa a ser
+     * PALAVRA_CHAVE, porque foi de fato a lista que decidiu a categoria final.
+     * O sinal de início/continuação do Gemini é preservado (ele não depende
+     * da categoria).
      */
     private PaginaClassificada classificarTexto(String textoOriginal) {
         String textoNormalizado = normalizar(textoOriginal);
+        if (textoNormalizado.isBlank()) {
+            return new PaginaClassificada(Categoria.OUTROS, MetodoClassificacao.SEM_TEXTO, textoNormalizado, null);
+        }
+
         ClassificacaoIa viaIa = geminiService.classificar(textoOriginal);
         if (viaIa != null) {
             if (viaIa.categoria() == Categoria.OUTROS) {
                 Categoria redeDeSeguranca = classificarPorPalavraChave(textoNormalizado);
-                if (redeDeSeguranca != Categoria.OUTROS) {
+                if (redeDeSeguranca != Categoria.OUTROS && !CATEGORIAS_TFD.contains(redeDeSeguranca)) {
                     return new PaginaClassificada(redeDeSeguranca, MetodoClassificacao.PALAVRA_CHAVE,
                             textoNormalizado, viaIa.inicioDocumento());
                 }
@@ -106,11 +201,21 @@ public class PdfSplitService {
         return new PaginaClassificada(viaPalavraChave, MetodoClassificacao.PALAVRA_CHAVE, textoNormalizado, null);
     }
 
+    /**
+     * TFD_RS x TFD_OUTROS_ESTADOS exige as DUAS coisas na mesma página: um
+     * termo genérico de TFD ({@link ClassificadorConfig#tfdTermoGenerico()})
+     * E um marcador do RS ({@link ClassificadorConfig#tfdRsMarcador()}).
+     * Marcador do RS sozinho (ex.: "central estadual de transplantes" numa
+     * página que não é sobre TFD, comum aqui já que é uma central de
+     * transplantes) NÃO classifica como TFD — evita falso positivo.
+     */
     private Categoria classificarPorPalavraChave(String textoNormalizado) {
-        if (contemAlgumaPalavra(textoNormalizado, config.tfdRs())) {
+        boolean tfdGenerico = contemAlgumaPalavra(textoNormalizado, config.tfdTermoGenerico());
+        boolean marcadorRs = contemAlgumaPalavra(textoNormalizado, config.tfdRsMarcador());
+        if (tfdGenerico && marcadorRs) {
             return Categoria.TFD_RS;
         }
-        if (contemAlgumaPalavra(textoNormalizado, config.tfdOutrosEstados())) {
+        if (tfdGenerico) {
             return Categoria.TFD_OUTROS_ESTADOS;
         }
         if (contemAlgumaPalavra(textoNormalizado, config.protocoloEncaminhamento())) {
@@ -136,8 +241,7 @@ public class PdfSplitService {
         for (String palavra : palavrasChave) {
             String normalizada = normalizar(palavra);
             if (normalizada.length() <= 3) {
-                if (java.util.regex.Pattern.compile("\\b" + java.util.regex.Pattern.quote(normalizada) + "\\b")
-                        .matcher(textoNormalizado).find()) {
+                if (Pattern.compile("\\b" + Pattern.quote(normalizada) + "\\b").matcher(textoNormalizado).find()) {
                     return true;
                 }
             } else if (textoNormalizado.contains(normalizada)) {
@@ -164,12 +268,12 @@ public class PdfSplitService {
      * as seguintes podem até ser classificadas como DOCUMENTOS, EXAMES etc.
      * isoladamente, mas continuam fazendo parte do MESMO pedido de TFD.
      *
-     * Por isso, ao detectar o gatilho, as próximas páginas até completar o
-     * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) entram
-     * na mesma categoria do gatilho — EXCETO se uma delas for, ela mesma, a
-     * CAPA de OUTRO pedido de TFD, o que indica que um novo bloco começa ali e
-     * não deve ser absorvido pelo anterior (ver
-     * {@link #iniciaNovoPedidoTfd(PaginaClassificada, Categoria)}).
+     * Por isso, ao detectar o gatilho: primeiro tenta puxar pra trás a capa
+     * real, caso a própria página-gatilho seja continuação (ver
+     * {@link #puxarCapaParaTras}); depois estende pra frente até completar o
+     * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco),
+     * parando em qualquer página que deva interromper a extensão (ver
+     * {@link #deveInterromperBloco}).
      *
      * Páginas já absorvidas por um bloco anterior não abrem bloco próprio,
      * senão uma página de continuação que isoladamente caiu em TFD arrastaria
@@ -190,11 +294,12 @@ public class PdfSplitService {
             if (!CATEGORIAS_TFD.contains(categoriaDoBloco) || absorvidaPorBlocoAnterior[i]) {
                 continue;
             }
+
+            puxarCapaParaTras(classificacoes, i, categoriaDoBloco, tamanhoBloco);
+
             int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
             for (int j = i + 1; j < fimBloco; j++) {
-                if (iniciaNovoPedidoTfd(classificacoes.get(j), original.get(j))) {
-                    // Capa de um novo pedido de TFD começa aqui — não faz parte
-                    // do bloco anterior, para de estender.
+                if (deveInterromperBloco(categoriaDoBloco, classificacoes.get(j), original.get(j))) {
                     break;
                 }
                 classificacoes.get(j).setCategoria(categoriaDoBloco);
@@ -205,17 +310,69 @@ public class PdfSplitService {
     }
 
     /**
+     * Se a própria página-gatilho foi marcada pelo Gemini como CONTINUAÇÃO
+     * (não INÍCIO), a capa real do pedido provavelmente ficou pra trás — por
+     * exemplo uma digitalização ruim que não deixou o cabeçalho legível — e
+     * caiu em OUTROS por falta de sinal próprio. Busca páginas OUTROS logo
+     * antes do gatilho e absorve no mesmo bloco também, senão a capa se
+     * perde. Só puxa páginas que hoje estão em OUTROS (nunca rouba página já
+     * absorvida por outro bloco).
+     */
+    private void puxarCapaParaTras(List<PaginaClassificada> classificacoes, int indiceGatilho,
+            Categoria categoriaDoBloco, int tamanhoBloco) {
+        if (!Boolean.FALSE.equals(classificacoes.get(indiceGatilho).getInicioDocumento())) {
+            return;
+        }
+        int k = indiceGatilho - 1;
+        int puxadas = 0;
+        while (k >= 0 && puxadas < tamanhoBloco - 1 && classificacoes.get(k).getCategoria() == Categoria.OUTROS) {
+            classificacoes.get(k).setCategoria(categoriaDoBloco);
+            classificacoes.get(k).setMetodo(MetodoClassificacao.REGRA_BLOCO_TFD);
+            k--;
+            puxadas++;
+        }
+    }
+
+    /**
      * Decide se a página, que está DENTRO da janela de um bloco de TFD já
-     * iniciado, é na verdade a CAPA de um novo pedido de TFD (e portanto deve
-     * interromper a extensão do bloco anterior).
+     * iniciado, deve interromper a extensão (ou seja: não faz parte do mesmo
+     * pedido).
+     */
+    private boolean deveInterromperBloco(Categoria categoriaDoBloco, PaginaClassificada pagina, Categoria categoriaIsolada) {
+        if (CATEGORIAS_TFD.contains(categoriaIsolada)) {
+            if (categoriaIsolada != categoriaDoBloco) {
+                // TFD_RS e TFD_OUTROS_ESTADOS nunca podem se misturar (regra
+                // de negócio) — interrompe sempre, mesmo se o Gemini achar
+                // que ali é continuação.
+                return true;
+            }
+            // Mesma categoria do bloco: pode ser só a justificativa
+            // mencionando TFD de novo (continuação) ou a capa de um SEGUNDO
+            // pedido igual colado em sequência — só quebra com sinal forte de
+            // capa nova.
+            return iniciaNovoPedidoTfd(pagina, categoriaIsolada);
+        }
+        if (categoriaIsolada == Categoria.OUTROS) {
+            return false;
+        }
+        // Categoria "real" diferente (documentos, exames, protocolo...)
+        // dentro da janela: sem sinal próprio presumimos que é anexo do
+        // mesmo pedido de TFD (regra do negócio: nunca perder página de
+        // continuação). Só interrompe se o Gemini disse CLARAMENTE que ali
+        // começa um documento novo.
+        return Boolean.TRUE.equals(pagina.getInicioDocumento());
+    }
+
+    /**
+     * Decide se a página, que está DENTRO da janela de um bloco de TFD já
+     * iniciado, é na verdade a CAPA de um novo pedido de TFD DA MESMA
+     * categoria (e portanto deve interromper a extensão do bloco anterior).
      *
      * A classificação isolada da página não basta: as listas de palavras-chave
-     * de TFD (principalmente classificador.tfd-outros-estados) são genéricas de
-     * propósito ("tfd", "tratamento fora de domicilio"...) e essas expressões
-     * aparecem no texto corrido das páginas de CONTINUAÇÃO do próprio
-     * formulário do RS (o checklist e a justificativa falam SOBRE o tratamento
-     * fora de domicílio). Era exatamente isso que fazia a 3ª página de um
-     * pedido do RS cair sozinha em tfd_outros_estados.
+     * de TFD são genéricas de propósito ("tfd", "tratamento fora de
+     * domicilio"...) e essas expressões aparecem no texto corrido das páginas
+     * de CONTINUAÇÃO do próprio formulário (o checklist e a justificativa
+     * falam SOBRE o tratamento fora de domicílio).
      *
      * Por isso exigimos um sinal FORTE de início de documento:
      * <ul>
@@ -275,6 +432,14 @@ public class PdfSplitService {
         return zipBytes.toByteArray();
     }
 
+    /**
+     * Relatório por página, com contagem por método sempre completa (todas as
+     * páginas) mas a lista detalhada por página limitada a
+     * {@link #LIMITE_PAGINAS_NO_RELATORIO} — em PDFs muito grandes, um
+     * cabeçalho HTTP sem limite pode ser cortado pelo proxy do Render e o
+     * relatório inteiro some sem explicação; melhor um relatório parcial e
+     * avisado (campo "paginasTruncadas") do que nenhum.
+     */
     private byte[] gerarRelatorioJson(List<PaginaClassificada> classificacoes) throws IOException {
         List<Map<String, Object>> paginas = new ArrayList<>();
         Map<String, Integer> resumo = new LinkedHashMap<>();
@@ -282,21 +447,25 @@ public class PdfSplitService {
             resumo.put(metodo.name(), 0);
         }
 
+        boolean truncado = classificacoes.size() > LIMITE_PAGINAS_NO_RELATORIO;
         for (int i = 0; i < classificacoes.size(); i++) {
             PaginaClassificada p = classificacoes.get(i);
-            Map<String, Object> entrada = new LinkedHashMap<>();
-            entrada.put("pagina", i + 1);
-            entrada.put("categoria", p.getCategoria().getPastaSaida());
-            entrada.put("metodo", p.getMetodo().name());
-            paginas.add(entrada);
-
             resumo.merge(p.getMetodo().name(), 1, Integer::sum);
+
+            if (i < LIMITE_PAGINAS_NO_RELATORIO) {
+                Map<String, Object> entrada = new LinkedHashMap<>();
+                entrada.put("pagina", i + 1);
+                entrada.put("categoria", p.getCategoria().getPastaSaida());
+                entrada.put("metodo", p.getMetodo().name());
+                paginas.add(entrada);
+            }
         }
 
         Map<String, Object> relatorio = new LinkedHashMap<>();
         relatorio.put("totalPaginas", classificacoes.size());
         relatorio.put("resumoPorMetodo", resumo);
         relatorio.put("paginas", paginas);
+        relatorio.put("paginasTruncadas", truncado);
 
         return objectMapper.writeValueAsBytes(relatorio);
     }
