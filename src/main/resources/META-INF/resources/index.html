@@ -624,7 +624,11 @@
 
       if (relatorioBase64) {
         try {
-          const relatorio = JSON.parse(atob(relatorioBase64));
+          // atob() decodifica base64 pra uma string "binária" (1 char por byte, Latin1) -
+          // se o JSON algum dia tiver um caractere acentuado, JSON.parse direto nela
+          // corromperia/quebraria. TextDecoder decodifica os bytes como UTF-8 de verdade.
+          const bytes = Uint8Array.from(atob(relatorioBase64), (c) => c.charCodeAt(0));
+          const relatorio = JSON.parse(new TextDecoder('utf-8').decode(bytes));
           renderizarResumoMetodo(relatorio);
         } catch (e) {
           // Sem relatório disponível, sem problema — o zip já foi baixado.

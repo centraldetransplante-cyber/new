@@ -49,7 +49,14 @@ public class PdfSplitService {
     private static final Set<Categoria> CATEGORIAS_TFD = Categoria.CATEGORIAS_TFD;
 
     /** Limite de páginas detalhadas no relatório (o cabeçalho HTTP não pode crescer sem limite). */
-    private static final int LIMITE_PAGINAS_NO_RELATORIO = 500;
+    /**
+     * 500 entradas (o valor original) ainda arriscava estourar limites comuns de proxy: cada entrada do relatório
+     * tem ~70-90 bytes de JSON, então 500 páginas já são ~35-45 KB de JSON, e o base64 (que infla ~33%) passa de
+     * 50 KB — acima do limite padrão de cabeçalho HTTP de vários proxies (frequentemente 8-16 KB). 150 mantém uma
+     * margem confortável mesmo nesse pior caso (~15-17 KB base64) e ainda cobre confortavelmente os PDFs desse
+     * domínio (bundles de TFD/exames tipicamente têm de 5 a 80 páginas).
+     */
+    private static final int LIMITE_PAGINAS_NO_RELATORIO = 150;
 
     /** Tamanho do pool compartilhado usado para paralelizar as chamadas ao Gemini (uma por página). */
     private static final int MAX_PARALELISMO_CLASSIFICACAO = 8;
@@ -169,15 +176,27 @@ public class PdfSplitService {
         }
     }
 
-    private List<String> extrairTextos(PDDocument documento) throws IOException {
+    /**
+     * Extrai o texto de cada página individualmente. Se uma única página tiver conteúdo corrompido (fonte
+     * inválida, stream quebrado), {@code PDFTextStripper} lança {@link IOException} — sem o try/catch por página,
+     * isso derrubaria a requisição inteira com 500 mesmo que as outras 99 páginas de um PDF de 100 estivessem
+     * perfeitas. Uma página que falhar vira texto vazio (tratada como {@code SEM_TEXTO} adiante) em vez de
+     * quebrar o processamento das demais.
+     */
+    private List<String> extrairTextos(PDDocument documento) {
         int totalPaginas = documento.getNumberOfPages();
         List<String> textos = new ArrayList<>(totalPaginas);
         PDFTextStripper stripper = new PDFTextStripper();
 
         for (int pagina = 1; pagina <= totalPaginas; pagina++) {
-            stripper.setStartPage(pagina);
-            stripper.setEndPage(pagina);
-            textos.add(stripper.getText(documento));
+            try {
+                stripper.setStartPage(pagina);
+                stripper.setEndPage(pagina);
+                textos.add(stripper.getText(documento));
+            } catch (IOException e) {
+                LOG.warn("Falha ao extrair texto da página " + pagina + " (conteúdo corrompido?) - tratando como sem texto", e);
+                textos.add("");
+            }
         }
         return textos;
     }
