@@ -20,6 +20,7 @@ import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.text.PDFTextStripper;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rafael.pdfsplitter.gemini.ClassificacaoIa;
 import com.rafael.pdfsplitter.gemini.GeminiClassificadorService;
 
 import jakarta.enterprise.context.ApplicationScoped;
@@ -74,12 +75,14 @@ public class PdfSplitService {
     }
 
     private PaginaClassificada classificarTexto(String textoOriginal) {
-        Categoria viaIa = geminiService.classificar(textoOriginal);
+        String textoNormalizado = normalizar(textoOriginal);
+        ClassificacaoIa viaIa = geminiService.classificar(textoOriginal);
         if (viaIa != null) {
-            return new PaginaClassificada(viaIa, MetodoClassificacao.GEMINI);
+            return new PaginaClassificada(viaIa.categoria(), MetodoClassificacao.GEMINI, textoNormalizado,
+                    viaIa.inicioDocumento());
         }
-        Categoria viaPalavraChave = classificarPorPalavraChave(normalizar(textoOriginal));
-        return new PaginaClassificada(viaPalavraChave, MetodoClassificacao.PALAVRA_CHAVE);
+        Categoria viaPalavraChave = classificarPorPalavraChave(textoNormalizado);
+        return new PaginaClassificada(viaPalavraChave, MetodoClassificacao.PALAVRA_CHAVE, textoNormalizado, null);
     }
 
     private Categoria classificarPorPalavraChave(String textoNormalizado) {
@@ -129,9 +132,14 @@ public class PdfSplitService {
      *
      * Por isso, ao detectar o gatilho, as próximas páginas até completar o
      * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) entram
-     * na mesma categoria do gatilho — EXCETO se uma delas for, ela mesma, o
-     * início de OUTRO pedido de TFD (RS ou de outro estado), o que indica que
-     * um novo bloco está começando ali e não deve ser absorvido pelo anterior.
+     * na mesma categoria do gatilho — EXCETO se uma delas for, ela mesma, a
+     * CAPA de OUTRO pedido de TFD, o que indica que um novo bloco começa ali e
+     * não deve ser absorvido pelo anterior (ver
+     * {@link #iniciaNovoPedidoTfd(PaginaClassificada, Categoria)}).
+     *
+     * Páginas já absorvidas por um bloco anterior não abrem bloco próprio,
+     * senão uma página de continuação que isoladamente caiu em TFD arrastaria
+     * as páginas seguintes para a categoria errada.
      */
     private void estenderBlocosTfd(List<PaginaClassificada> classificacoes) {
         List<Categoria> original = new ArrayList<>();
@@ -141,23 +149,65 @@ public class PdfSplitService {
 
         int tamanhoBloco = Math.max(1, config.tfdRsPaginasPorBloco());
         int totalPaginas = classificacoes.size();
+        boolean[] absorvidaPorBlocoAnterior = new boolean[totalPaginas];
 
         for (int i = 0; i < totalPaginas; i++) {
             Categoria categoriaDoBloco = original.get(i);
-            if (!CATEGORIAS_TFD.contains(categoriaDoBloco)) {
+            if (!CATEGORIAS_TFD.contains(categoriaDoBloco) || absorvidaPorBlocoAnterior[i]) {
                 continue;
             }
             int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
             for (int j = i + 1; j < fimBloco; j++) {
-                if (CATEGORIAS_TFD.contains(original.get(j))) {
-                    // Um novo pedido de TFD começa aqui (mesmo que seja outro
-                    // estado) — não faz parte do bloco anterior, para de estender.
+                if (iniciaNovoPedidoTfd(classificacoes.get(j), original.get(j))) {
+                    // Capa de um novo pedido de TFD começa aqui — não faz parte
+                    // do bloco anterior, para de estender.
                     break;
                 }
                 classificacoes.get(j).setCategoria(categoriaDoBloco);
                 classificacoes.get(j).setMetodo(MetodoClassificacao.REGRA_BLOCO_TFD);
+                absorvidaPorBlocoAnterior[j] = true;
             }
         }
+    }
+
+    /**
+     * Decide se a página, que está DENTRO da janela de um bloco de TFD já
+     * iniciado, é na verdade a CAPA de um novo pedido de TFD (e portanto deve
+     * interromper a extensão do bloco anterior).
+     *
+     * A classificação isolada da página não basta: as listas de palavras-chave
+     * de TFD (principalmente classificador.tfd-outros-estados) são genéricas de
+     * propósito ("tfd", "tratamento fora de domicilio"...) e essas expressões
+     * aparecem no texto corrido das páginas de CONTINUAÇÃO do próprio
+     * formulário do RS (o checklist e a justificativa falam SOBRE o tratamento
+     * fora de domicílio). Era exatamente isso que fazia a 3ª página de um
+     * pedido do RS cair sozinha em tfd_outros_estados.
+     *
+     * Por isso exigimos um sinal FORTE de início de documento:
+     * <ul>
+     *   <li>Gemini (que lê o texto da página) dizendo explicitamente que a
+     *       página é INÍCIO de documento — e, se ele disser CONTINUAÇÃO, a
+     *       página nunca quebra o bloco, mesmo com categoria de TFD;</li>
+     *   <li>ou, sem esse sinal (fallback por palavra-chave / resposta antiga do
+     *       Gemini), texto batendo em classificador.tfd-cabecalho-novo-documento,
+     *       que só tem termos de cabeçalho/timbre/título de formulário.</li>
+     * </ul>
+     */
+    private boolean iniciaNovoPedidoTfd(PaginaClassificada pagina, Categoria categoriaIsolada) {
+        if (!CATEGORIAS_TFD.contains(categoriaIsolada)) {
+            return false;
+        }
+        if (!config.tfdExigirCabecalhoParaQuebrarBloco()) {
+            // Comportamento antigo, mantido só como escape via configuração.
+            return true;
+        }
+
+        Boolean inicioDocumento = pagina.getInicioDocumento();
+        if (inicioDocumento != null) {
+            // Sinal do Gemini: mais confiável que substring de palavra-chave.
+            return inicioDocumento;
+        }
+        return contemAlgumaPalavra(pagina.getTextoNormalizado(), config.tfdCabecalhoNovoDocumento());
     }
 
     private Map<Categoria, List<Integer>> agruparPorCategoria(List<PaginaClassificada> classificacoes) {

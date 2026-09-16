@@ -31,11 +31,12 @@ public class GeminiClassificadorService {
 
     /**
      * Pede ao Gemini para classificar o texto de uma página em uma das
-     * categorias suportadas. Retorna null se a chamada falhar (ex: sem rede,
-     * quota, resposta inesperada) para que o chamador use o fallback por
-     * palavra-chave.
+     * categorias suportadas e, junto, dizer se a página é o INÍCIO de um
+     * documento ou a CONTINUAÇÃO do documento anterior. Retorna null se a
+     * chamada falhar (ex: sem rede, quota, resposta inesperada) para que o
+     * chamador use o fallback por palavra-chave.
      */
-    public Categoria classificar(String textoPagina) {
+    public ClassificacaoIa classificar(String textoPagina) {
         if (!disponivel()) {
             return null;
         }
@@ -51,8 +52,23 @@ public class GeminiClassificadorService {
 
     private String montarPrompt(String textoPagina) {
         return """
-                Classifique o texto de UMA página de um PDF em exatamente uma das categorias abaixo.
-                Responda APENAS com o identificador da categoria (uma palavra), sem explicações.
+                Classifique o texto de UMA página de um PDF em exatamente uma das categorias abaixo e diga
+                também se essa página é o INÍCIO de um documento ou a CONTINUAÇÃO do documento anterior.
+
+                Responda APENAS em uma linha, no formato:
+                CATEGORIA|INICIO   ou   CATEGORIA|CONTINUACAO
+                (sem explicações, sem pontuação extra).
+
+                Como decidir INICIO x CONTINUACAO:
+                - INICIO: a página abre um documento novo. Tem cabeçalho/timbre institucional, brasão, nome do
+                  órgão, título de formulário, número de protocolo/formulário no topo, ou é claramente a primeira
+                  folha de um documento (capa, requerimento, laudo com cabeçalho próprio).
+                - CONTINUACAO: a página é a 2ª, 3ª... folha do MESMO documento que vinha antes. Começa direto no
+                  meio do conteúdo (itens de checklist, perguntas sim/não, "Queixa principal", história clínica,
+                  assinaturas, campos de preenchimento) e NÃO repete o cabeçalho/timbre do formulário.
+                - ATENÇÃO: uma página de continuação de um formulário de TFD frequentemente MENCIONA "TFD" ou
+                  "tratamento fora de domicílio" no meio do texto corrido (justificando o pedido). Isso NÃO faz
+                  dela o início de um documento novo — se não houver cabeçalho/timbre próprio, responda CONTINUACAO.
 
                 Categorias:
                 - TFD_RS: documento de Tratamento Fora de Domicílio (TFD) especificamente do Rio Grande do Sul. A
@@ -73,18 +89,44 @@ public class GeminiClassificadorService {
                 %s
                 ---
 
-                Responda só com uma destas palavras: TFD_RS, TFD_OUTROS_ESTADOS, PROTOCOLO_ENCAMINHAMENTO, EXAMES, DOCUMENTOS, OUTROS
+                A categoria deve ser uma destas: TFD_RS, TFD_OUTROS_ESTADOS, PROTOCOLO_ENCAMINHAMENTO, EXAMES, DOCUMENTOS, OUTROS
+                Exemplos de resposta válida: TFD_RS|INICIO
+                TFD_RS|CONTINUACAO
+                EXAMES|INICIO
                 """.formatted(textoPagina == null ? "" : textoPagina.trim());
     }
 
-    private Categoria interpretarResposta(String texto) {
+    /**
+     * Interpreta a resposta no formato {@code CATEGORIA|INICIO} /
+     * {@code CATEGORIA|CONTINUACAO}. Continua aceitando respostas antigas só
+     * com a categoria (nesse caso o sinal de início/continuação fica nulo).
+     */
+    private ClassificacaoIa interpretarResposta(String texto) {
         if (texto == null) {
             return null;
         }
-        String limpo = texto.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z_]", "");
+        String limpo = texto.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z_|]", "");
+
+        String parteCategoria = limpo;
+        // Sem o separador, procura o marcador no texto inteiro (nenhum nome de
+        // categoria contém "INICIO"/"CONTINUACAO", então não há ambiguidade).
+        String parteInicio = limpo;
+        int separador = limpo.indexOf('|');
+        if (separador >= 0) {
+            parteCategoria = limpo.substring(0, separador);
+            parteInicio = limpo.substring(separador + 1);
+        }
+
+        Boolean inicioDocumento = null;
+        if (parteInicio.contains("CONTINUACAO")) {
+            inicioDocumento = Boolean.FALSE;
+        } else if (parteInicio.contains("INICIO")) {
+            inicioDocumento = Boolean.TRUE;
+        }
+
         for (Categoria categoria : Categoria.values()) {
-            if (limpo.contains(categoria.name())) {
-                return categoria;
+            if (parteCategoria.contains(categoria.name())) {
+                return new ClassificacaoIa(categoria, inicioDocumento);
             }
         }
         LOG.warnf("Resposta do Gemini não reconhecida como categoria: '%s'", texto);

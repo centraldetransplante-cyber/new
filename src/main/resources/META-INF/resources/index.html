@@ -529,7 +529,13 @@
 
     input.addEventListener('change', () => selecionar(input.files[0]));
     removerBtn.addEventListener('click', limparSelecao);
-    enviarOutroBtn.addEventListener('click', limparSelecao);
+    enviarOutroBtn.addEventListener('click', () => {
+      const temResultadoDeSucesso = resultado.classList.contains('ok');
+      if (temResultadoDeSucesso && !confirm('Isso vai limpar o resultado atual da tela. Deseja continuar?')) {
+        return;
+      }
+      limparSelecao();
+    });
 
     drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
