@@ -298,6 +298,22 @@
   .resultado-lista .tamanho { color: var(--text-muted); }
   .resultado-erro-msg { margin-top: 6px; font-size: .85rem; color: var(--text-muted); }
 
+  button#enviarOutro {
+    display: none;
+    margin-top: 16px;
+    width: 100%;
+    padding: 11px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    font-size: .9rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button#enviarOutro:hover { border-color: var(--accent); color: var(--accent); }
+  .resultado.ativo button#enviarOutro { display: block; }
+
   .metodo-resumo {
     margin-top: 14px;
     padding-top: 14px;
@@ -429,6 +445,8 @@
           <div class="metodo-detalhe" id="metodoDetalheToggle">Ver por página ▾</div>
           <div class="metodo-paginas" id="metodoPaginas"></div>
         </div>
+
+        <button id="enviarOutro" type="button">Enviar outro PDF</button>
       </div>
     </div>
 
@@ -442,6 +460,7 @@
     const nomeEl = document.getElementById('arquivoNome');
     const tamanhoEl = document.getElementById('arquivoTamanho');
     const removerBtn = document.getElementById('arquivoRemover');
+    const enviarOutroBtn = document.getElementById('enviarOutro');
     const botao = document.getElementById('enviar');
     const progresso = document.getElementById('progresso');
     const progressoBarra = document.getElementById('progressoBarra');
@@ -510,6 +529,7 @@
 
     input.addEventListener('change', () => selecionar(input.files[0]));
     removerBtn.addEventListener('click', limparSelecao);
+    enviarOutroBtn.addEventListener('click', limparSelecao);
 
     drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
