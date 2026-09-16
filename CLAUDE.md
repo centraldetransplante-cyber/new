@@ -123,6 +123,14 @@ the `CONTEXTO` prompt/stitching logic instead, since PAGINA is meant to stay a f
 - **Grouping + zip assembly** (`agruparPorCategoria`, `montarZip`): pages are grouped by final category (in
   `Categoria` enum order) and each group becomes one merged PDF named `<categoria>.pdf` inside a flat zip (no
   subfolders — explicit user requirement).
+- **Per-category size cap** (`comprimirSePreciso`, `classificador.tamanho-maximo-arquivo-mb`, default 10): if a
+  category's merged PDF comes out bigger than the limit (common for `exames.pdf` with many scanned images), its
+  images are recompressed as JPEG at progressively lower quality (`QUALIDADES_COMPRESSAO`: 0.6 → 0.08) via
+  `recomprimirImagensDosRecursos`/`JPEGFactory.createFromImage`, stopping at the first quality level that fits.
+  Never drops the file even if the strongest compression still doesn't fit under the limit — just logs a warning
+  and ships the smallest version achieved. This is deliberately a *per-output-file* limit, not an upload-size limit
+  (that's the separate `quarkus.http.limits.max-body-size`) — the user asked specifically for the split PDFs
+  themselves to stay under a size cap, not the original combined upload.
 - **Classification report** (`gerarRelatorioJson`): per-page category + method, totals per method, and — since the
   CONTEXTO redesign — a `documentos` array of contiguous same-category page ranges (`gerarBlocosDeDocumento`,
   e.g. `{"inicio":1,"fim":5,"categoria":"tfd_rs"}`), which is the most direct way for the user to sanity-check

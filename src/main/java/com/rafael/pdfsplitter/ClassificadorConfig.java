@@ -104,4 +104,12 @@ public interface ClassificadorConfig {
     /** Trunca o texto de cada página nesse tanto de caracteres antes de montar o prompt (OCR ruim pode gerar lixo). */
     @WithDefault("2500")
     int contextoMaxCaracteresPorPagina();
+
+    /**
+     * Tamanho máximo (em MB) de cada PDF de categoria gerado. Se o PDF de uma categoria (ex.: exames.pdf, com
+     * muitas imagens de exame escaneadas) sair maior que isso, as imagens dele são recomprimidas (qualidade JPEG
+     * reduzida em etapas) até caber no limite — ver {@code PdfSplitService.comprimirSePreciso}.
+     */
+    @WithDefault("10")
+    int tamanhoMaximoArquivoMb();
 }

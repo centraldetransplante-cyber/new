@@ -1,5 +1,6 @@
 package com.rafael.pdfsplitter;
 
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -18,9 +19,16 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.cos.COSDictionary;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
+import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.JPEGFactory;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.jboss.logging.Logger;
@@ -414,7 +422,7 @@ public class PdfSplitService {
                     continue;
                 }
 
-                byte[] pdfDaCategoria = extrairPaginas(origem, paginas);
+                byte[] pdfDaCategoria = comprimirSePreciso(extrairPaginas(origem, paginas), categoria.getPastaSaida());
                 String nomeArquivo = categoria.getPastaSaida() + ".pdf";
 
                 zip.putNextEntry(new ZipEntry(nomeArquivo));
@@ -500,6 +508,87 @@ public class PdfSplitService {
             }
             novo.save(saida);
             return saida.toByteArray();
+        }
+    }
+
+    /**
+     * Se o PDF de uma categoria sair maior que {@code classificador.tamanho-maximo-arquivo-mb} (comum em
+     * categorias com muitas páginas escaneadas, ex.: exames.pdf), recomprime as imagens em qualidades JPEG cada
+     * vez menores até caber no limite, parando na primeira que couber. Se nem a compressão mais forte for
+     * suficiente, devolve o resultado mais comprimido mesmo assim (nunca descarta o arquivo).
+     */
+    private byte[] comprimirSePreciso(byte[] pdfOriginal, String nomeCategoria) {
+        long limiteBytes = Math.max(1, config.tamanhoMaximoArquivoMb()) * 1024L * 1024L;
+        if (pdfOriginal.length <= limiteBytes) {
+            return pdfOriginal;
+        }
+
+        byte[] melhorResultado = pdfOriginal;
+        for (float qualidade : QUALIDADES_COMPRESSAO) {
+            try {
+                byte[] comprimido = recomprimirImagens(pdfOriginal, qualidade);
+                melhorResultado = comprimido;
+                if (comprimido.length <= limiteBytes) {
+                    LOG.infof("%s.pdf comprimido de %d para %d bytes (qualidade JPEG %.2f) para caber no limite de %d MB",
+                            nomeCategoria, pdfOriginal.length, comprimido.length, qualidade, config.tamanhoMaximoArquivoMb());
+                    return comprimido;
+                }
+            } catch (IOException e) {
+                LOG.warn("Falha ao comprimir " + nomeCategoria + ".pdf, mantendo o melhor resultado obtido até agora", e);
+                break;
+            }
+        }
+        LOG.warnf("%s.pdf continua acima do limite de %d MB mesmo após compressão máxima (%d bytes)",
+                nomeCategoria, config.tamanhoMaximoArquivoMb(), melhorResultado.length);
+        return melhorResultado;
+    }
+
+    private static final float[] QUALIDADES_COMPRESSAO = { 0.6f, 0.4f, 0.25f, 0.15f, 0.08f };
+
+    private byte[] recomprimirImagens(byte[] pdfOriginal, float qualidade) throws IOException {
+        try (PDDocument documento = Loader.loadPDF(pdfOriginal);
+                ByteArrayOutputStream saida = new ByteArrayOutputStream()) {
+            for (PDPage pagina : documento.getPages()) {
+                recomprimirImagensDosRecursos(documento, pagina.getResources(), qualidade);
+            }
+            documento.save(saida);
+            return saida.toByteArray();
+        }
+    }
+
+    /**
+     * Percorre os XObjects de uma página (e, recursivamente, os de Form XObjects aninhados) recomprimindo cada
+     * imagem encontrada como JPEG na qualidade indicada. Substitui a imagem original no dicionário de recursos
+     * pelo mesmo nome — os operadores de conteúdo da página continuam apontando para o nome, então não é preciso
+     * reescrever o conteúdo da página, só o recurso.
+     */
+    private void recomprimirImagensDosRecursos(PDDocument documento, PDResources recursos, float qualidade) throws IOException {
+        if (recursos == null) {
+            return;
+        }
+        COSDictionary dicionarioXObjects = (COSDictionary) recursos.getCOSObject().getDictionaryObject(COSName.XOBJECT);
+        // getXObjectNames() devolve só um Iterable (não uma List) e, sendo apoiado no
+        // proprio dicionario de recursos, alterar uma entrada durante a iteracao poderia
+        // dar ConcurrentModificationException - por isso copia os nomes pra uma lista antes.
+        List<COSName> nomes = new ArrayList<>();
+        for (COSName nome : recursos.getXObjectNames()) {
+            nomes.add(nome);
+        }
+        for (COSName nome : nomes) {
+            PDXObject xobject = recursos.getXObject(nome);
+            if (xobject instanceof PDImageXObject imagemOriginal) {
+                try {
+                    BufferedImage imagem = imagemOriginal.getImage();
+                    PDImageXObject imagemComprimida = JPEGFactory.createFromImage(documento, imagem, qualidade);
+                    if (dicionarioXObjects != null) {
+                        dicionarioXObjects.setItem(nome, imagemComprimida.getCOSObject());
+                    }
+                } catch (Exception e) {
+                    LOG.debug("Não foi possível recomprimir uma imagem (mantendo original)", e);
+                }
+            } else if (xobject instanceof PDFormXObject formulario) {
+                recomprimirImagensDosRecursos(documento, formulario.getResources(), qualidade);
+            }
         }
     }
 }
