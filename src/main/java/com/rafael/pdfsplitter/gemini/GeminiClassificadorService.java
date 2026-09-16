@@ -81,7 +81,9 @@ public class GeminiClassificadorService {
                   de TFD/tratamento fora de domicílio sem indicar claramente que é do RS).
                 - PROTOCOLO_ENCAMINHAMENTO: protocolo de encaminhamento entre unidades/serviços de saúde.
                 - EXAMES: pedidos, laudos ou resultados de exames médicos (sangue, imagem, etc).
-                - DOCUMENTOS: documentos pessoais (RG, CPF, certidões) e comprovante de residência.
+                - DOCUMENTOS: documentos pessoais e comprobatórios em geral — RG, CPF, identidade, certidões,
+                  comprovante de residência, declarações, procurações, carteira/cartão do SUS e encaminhamento
+                  médico comum (sem o formato de protocolo de encaminhamento entre unidades).
                 - OUTROS: qualquer outro conteúdo que não se encaixe nas categorias acima.
 
                 Texto da página:

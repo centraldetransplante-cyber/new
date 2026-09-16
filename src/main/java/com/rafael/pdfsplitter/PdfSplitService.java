@@ -74,10 +74,31 @@ public class PdfSplitService {
         return resultado;
     }
 
+    /**
+     * Classifica uma página: o Gemini decide, e só caímos para a lista de
+     * palavras-chave quando ele falha (sem rede, quota, resposta inválida).
+     *
+     * Exceção: quando o Gemini responde OUTROS. Esse é o "balde" que engolia
+     * páginas que a lista de palavras-chave reconheceria sem dúvida (RG, CPF,
+     * certidão, comprovante de residência, declaração, procuração, cartão do
+     * SUS, encaminhamento...), fazendo documentos saírem dentro de outros.pdf.
+     * Nesse caso — e SÓ nesse — conferimos o texto contra as palavras-chave; se
+     * elas apontarem uma categoria real, ela prevalece sobre o OUTROS do
+     * Gemini. O método registrado passa a ser PALAVRA_CHAVE, porque foi de fato
+     * a lista que decidiu a categoria final. O sinal de início/continuação do
+     * Gemini é preservado (ele não depende da categoria).
+     */
     private PaginaClassificada classificarTexto(String textoOriginal) {
         String textoNormalizado = normalizar(textoOriginal);
         ClassificacaoIa viaIa = geminiService.classificar(textoOriginal);
         if (viaIa != null) {
+            if (viaIa.categoria() == Categoria.OUTROS) {
+                Categoria redeDeSeguranca = classificarPorPalavraChave(textoNormalizado);
+                if (redeDeSeguranca != Categoria.OUTROS) {
+                    return new PaginaClassificada(redeDeSeguranca, MetodoClassificacao.PALAVRA_CHAVE,
+                            textoNormalizado, viaIa.inicioDocumento());
+                }
+            }
             return new PaginaClassificada(viaIa.categoria(), MetodoClassificacao.GEMINI, textoNormalizado,
                     viaIa.inicioDocumento());
         }
@@ -104,9 +125,22 @@ public class PdfSplitService {
         return Categoria.OUTROS;
     }
 
+    /**
+     * Palavras-chave muito curtas (ex.: "rg") não usam contains puro, senão
+     * batem dentro de qualquer palavra que contenha essas letras em sequência
+     * ("urgente", "orgao", "cirurgia", "energia"...) — usa-se \b (borda de
+     * palavra) só para essas. Palavras mais longas continuam com contains,
+     * que já tolera variações de pontuação/plural ao redor.
+     */
     private boolean contemAlgumaPalavra(String textoNormalizado, List<String> palavrasChave) {
         for (String palavra : palavrasChave) {
-            if (textoNormalizado.contains(normalizar(palavra))) {
+            String normalizada = normalizar(palavra);
+            if (normalizada.length() <= 3) {
+                if (java.util.regex.Pattern.compile("\\b" + java.util.regex.Pattern.quote(normalizada) + "\\b")
+                        .matcher(textoNormalizado).find()) {
+                    return true;
+                }
+            } else if (textoNormalizado.contains(normalizada)) {
                 return true;
             }
         }
