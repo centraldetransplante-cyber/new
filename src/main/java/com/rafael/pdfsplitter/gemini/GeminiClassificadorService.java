@@ -55,7 +55,14 @@ public class GeminiClassificadorService {
                 Responda APENAS com o identificador da categoria (uma palavra), sem explicações.
 
                 Categorias:
-                - TFD_RS: documento de Tratamento Fora de Domicílio (TFD/RS), autorização de viagem, central de regulação.
+                - TFD_RS: documento de Tratamento Fora de Domicílio (TFD) especificamente do Rio Grande do Sul. A
+                  página de capa é um formulário fixo com o cabeçalho "ESTADO DO RIO GRANDE DO SUL", "SECRETARIA
+                  ESTADUAL DE SAÚDE", "DEPARTAMENTO DE REGULAÇÃO ESTADUAL" e "CENTRAL ESTADUAL DE TRANSPLANTES", com o
+                  título "Solicitação de cadastro para consulta -TFD". Só classifique como TFD_RS se o texto indicar
+                  claramente que é do Rio Grande do Sul (RS).
+                - TFD_OUTROS_ESTADOS: documento de Tratamento Fora de Domicílio (TFD) igual ao TFD_RS em estrutura e
+                  finalidade, mas de QUALQUER OUTRO estado que não seja o Rio Grande do Sul (ou quando o texto fala
+                  de TFD/tratamento fora de domicílio sem indicar claramente que é do RS).
                 - PROTOCOLO_ENCAMINHAMENTO: protocolo de encaminhamento entre unidades/serviços de saúde.
                 - EXAMES: pedidos, laudos ou resultados de exames médicos (sangue, imagem, etc).
                 - DOCUMENTOS: documentos pessoais (RG, CPF, certidões) e comprovante de residência.
@@ -66,7 +73,7 @@ public class GeminiClassificadorService {
                 %s
                 ---
 
-                Responda só com uma destas palavras: TFD_RS, PROTOCOLO_ENCAMINHAMENTO, EXAMES, DOCUMENTOS, OUTROS
+                Responda só com uma destas palavras: TFD_RS, TFD_OUTROS_ESTADOS, PROTOCOLO_ENCAMINHAMENTO, EXAMES, DOCUMENTOS, OUTROS
                 """.formatted(textoPagina == null ? "" : textoPagina.trim());
     }
 

@@ -6,9 +6,11 @@ import java.io.InputStream;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -24,6 +26,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 @ApplicationScoped
 public class PdfSplitService {
+
+    /** Categorias de TFD que seguem a regra de bloco (capa fixa + páginas de continuação sem texto). */
+    private static final Set<Categoria> CATEGORIAS_TFD = EnumSet.of(Categoria.TFD_RS, Categoria.TFD_OUTROS_ESTADOS);
 
     private final ClassificadorConfig config;
     private final GeminiClassificadorService geminiService;
@@ -46,7 +51,7 @@ public class PdfSplitService {
     public ResultadoSeparacao separar(InputStream pdfInputStream) throws IOException {
         try (PDDocument origem = Loader.loadPDF(pdfInputStream.readAllBytes())) {
             List<PaginaClassificada> classificacoes = classificarPaginas(origem);
-            estenderBlocosTfdRs(classificacoes);
+            estenderBlocosTfd(classificacoes);
             Map<Categoria, List<Integer>> paginasPorCategoria = agruparPorCategoria(classificacoes);
             byte[] zip = montarZip(origem, paginasPorCategoria);
             String relatorioJson = new String(gerarRelatorioJson(classificacoes), java.nio.charset.StandardCharsets.UTF_8);
@@ -81,6 +86,9 @@ public class PdfSplitService {
         if (contemAlgumaPalavra(textoNormalizado, config.tfdRs())) {
             return Categoria.TFD_RS;
         }
+        if (contemAlgumaPalavra(textoNormalizado, config.tfdOutrosEstados())) {
+            return Categoria.TFD_OUTROS_ESTADOS;
+        }
         if (contemAlgumaPalavra(textoNormalizado, config.protocoloEncaminhamento())) {
             return Categoria.PROTOCOLO_ENCAMINHAMENTO;
         }
@@ -112,17 +120,18 @@ public class PdfSplitService {
     }
 
     /**
-     * Normalmente só a 1ª página de um documento TFD/RS contém as palavras-chave;
-     * as páginas seguintes do mesmo bloco costumam ser continuação sem texto
-     * identificável (caem em OUTROS na classificação isolada). Ao detectar o
-     * gatilho, as próximas páginas até completar o tamanho do bloco (config:
-     * classificador.tfd-rs-paginas-por-bloco) também são marcadas como TFD/RS —
-     * mas SOMENTE se elas não tiverem sido classificadas como algo próprio
-     * (OUTROS). Uma página que já foi identificada como outra categoria (por
-     * IA ou palavra-chave) significa que um novo documento começou ali, então
-     * essa regra não a sobrescreve.
+     * Normalmente só a 1ª página de um documento de TFD (RS ou de outro estado)
+     * contém as palavras-chave; as páginas seguintes do mesmo bloco costumam
+     * ser continuação sem texto identificável (caem em OUTROS na classificação
+     * isolada). Ao detectar o gatilho, as próximas páginas até completar o
+     * tamanho do bloco (config: classificador.tfd-rs-paginas-por-bloco) também
+     * entram na MESMA categoria do gatilho (TFD_RS continua TFD_RS, TFD de
+     * outro estado continua TFD_OUTROS_ESTADOS) — mas SOMENTE se elas não
+     * tiverem sido classificadas como algo próprio (OUTROS). Uma página que já
+     * foi identificada como outra categoria (por IA ou palavra-chave) significa
+     * que um novo documento começou ali, então essa regra não a sobrescreve.
      */
-    private void estenderBlocosTfdRs(List<PaginaClassificada> classificacoes) {
+    private void estenderBlocosTfd(List<PaginaClassificada> classificacoes) {
         List<Categoria> original = new ArrayList<>();
         for (PaginaClassificada p : classificacoes) {
             original.add(p.getCategoria());
@@ -132,18 +141,19 @@ public class PdfSplitService {
         int totalPaginas = classificacoes.size();
 
         for (int i = 0; i < totalPaginas; i++) {
-            if (original.get(i) != Categoria.TFD_RS) {
+            Categoria categoriaDoBloco = original.get(i);
+            if (!CATEGORIAS_TFD.contains(categoriaDoBloco)) {
                 continue;
             }
             int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
             for (int j = i + 1; j < fimBloco; j++) {
                 if (original.get(j) != Categoria.OUTROS) {
                     // Página já tem classificação própria (ex: começo de outro
-                    // documento) — não faz parte do bloco TFD/RS, para de estender.
+                    // documento) — não faz parte do bloco, para de estender.
                     break;
                 }
-                classificacoes.get(j).setCategoria(Categoria.TFD_RS);
-                classificacoes.get(j).setMetodo(MetodoClassificacao.REGRA_BLOCO_TFD_RS);
+                classificacoes.get(j).setCategoria(categoriaDoBloco);
+                classificacoes.get(j).setMetodo(MetodoClassificacao.REGRA_BLOCO_TFD);
             }
         }
     }
