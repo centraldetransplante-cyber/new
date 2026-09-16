@@ -355,16 +355,18 @@ public class PdfSplitService {
      */
     private boolean deveInterromperBloco(Categoria categoriaDoBloco, PaginaClassificada pagina, Categoria categoriaIsolada) {
         if (CATEGORIAS_TFD.contains(categoriaIsolada)) {
-            if (categoriaIsolada != categoriaDoBloco) {
-                // TFD_RS e TFD_OUTROS_ESTADOS nunca podem se misturar (regra
-                // de negócio) — interrompe sempre, mesmo se o Gemini achar
-                // que ali é continuação.
-                return true;
-            }
-            // Mesma categoria do bloco: pode ser só a justificativa
-            // mencionando TFD de novo (continuação) ou a capa de um SEGUNDO
-            // pedido igual colado em sequência — só quebra com sinal forte de
-            // capa nova.
+            // Seja da MESMA categoria do bloco ou de uma categoria de TFD
+            // DIFERENTE, uma página aqui dentro pode ser só um anexo do MESMO
+            // pedido: o exemplo real que expôs isso é o laudo médico emitido
+            // pela secretaria de saúde do ESTADO DE ORIGEM do paciente,
+            // anexado para justificar um pedido de TFD/RS — tem timbre/título
+            // institucional próprio (por isso bate isoladamente em
+            // TFD_OUTROS_ESTADOS), mas continua sendo parte do MESMO bloco
+            // do RS, não uma segunda solicitação. Só interrompe com sinal
+            // FORTE e específico de nova capa (Gemini INICIO, ou o texto
+            // batendo no cabeçalho exclusivo do formulário de cadastro do
+            // RS) — nunca só por a categoria isolada ser diferente da do
+            // bloco. Ver iniciaNovoPedidoTfd.
             return iniciaNovoPedidoTfd(pagina, categoriaIsolada);
         }
         if (categoriaIsolada == Categoria.OUTROS) {

@@ -84,13 +84,28 @@ locally instead of falling back to keywords.
    that list with anything that could plausibly appear in running prose — it exists specifically to be stricter
    than `tfd-termo-generico`.
 
-   `TFD_RS` vs `TFD_OUTROS_ESTADOS` is itself a hard business requirement, not a nice-to-have: TFD/RS means
-   *specifically* Rio Grande do Sul's own form. The keyword fallback (`classificarPorPalavraChave`) requires BOTH a
-   generic TFD term (`classificador.tfd-termo-generico`) AND an RS marker (`classificador.tfd-rs-marcador`) on the
-   same page to call it TFD_RS — an RS marker alone (e.g. "central estadual de transplantes", which shows up in this
-   org's own non-TFD correspondence since they *are* a transplant center) is deliberately not enough. `deveInterromperBloco`
-   also treats a page independently classified as the *other* TFD category as an unconditional block break, even if
-   Gemini calls it CONTINUACAO — the two must never merge.
+   `TFD_RS` vs `TFD_OUTROS_ESTADOS` distinguishes what *category a standalone request* belongs to: TFD/RS means
+   *specifically* Rio Grande do Sul's own cadastro form. The keyword fallback (`classificarPorPalavraChave`) requires
+   BOTH a generic TFD term (`classificador.tfd-termo-generico`) AND an RS marker (`classificador.tfd-rs-marcador`) on
+   the same page to call it TFD_RS — an RS marker alone (e.g. "central estadual de transplantes", which shows up in
+   this org's own non-TFD correspondence since they *are* a transplant center) is deliberately not enough.
+
+   **Important, learned from a real production bug**: a page independently classified as the *other* TFD category
+   does NOT automatically break the block. A TFD/RS request is routinely bundled with a `LAUDO MÉDICO` issued by the
+   patient's *home state* health department (a different state's own letterhead/title, justifying the RS request) —
+   that attachment, on its own, legitimately matches `TFD_OUTROS_ESTADOS`'s definition, and Gemini's per-page INICIO
+   signal would naturally say INICIO too (it does have its own institutional letterhead). If `deveInterromperBloco`
+   ever unconditionally breaks the block on a differing TFD category (it did once, briefly, as an over-correction —
+   see git history around commit `76a5e86`), a real RS bundle gets truncated to just its cover page, with the
+   attachment wrongly landing alone in `tfd_outros_estados.pdf`. The fix: `deveInterromperBloco` always defers to
+   `iniciaNovoPedidoTfd` (Gemini INICIO/CONTINUACAO, else the narrow header list) for *any* TFD-classified page in
+   the window, same or different category — never an unconditional break. The Gemini prompt also explicitly tells
+   the model to answer CONTINUACAO for this "home-state laudo médico attached to a TFD/RS request" pattern. The
+   narrow `tfd-cabecalho-novo-documento` list must stay exclusive to the *RS cadastro form's own* header terms
+   (`estado do rio grande do sul`, `central estadual de transplantes`, `departamento de regulacao estadual`,
+   `solicitacao de cadastro para consulta`, `complexo regulador`) — generic health-department terms like `secretaria
+   estadual de saude` or `governo do estado` match *any* state's letterhead, including a legitimately-attached
+   home-state laudo, and must never go back in that list.
 
    Two more edge cases handled in `estenderBlocosTfd`: `puxarCapaParaTras` pulls preceding `OUTROS` pages backward into
    the block when the trigger page itself is marked CONTINUACAO (the real cover likely has no extractable text and

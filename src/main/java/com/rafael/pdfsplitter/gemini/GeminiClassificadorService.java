@@ -85,6 +85,15 @@ public class GeminiClassificadorService {
                 - ATENÇÃO: uma página de continuação de um formulário de TFD frequentemente MENCIONA "TFD" ou
                   "tratamento fora de domicílio" no meio do texto corrido (justificando o pedido). Isso NÃO faz
                   dela o início de um documento novo — se não houver cabeçalho/timbre próprio, responda CONTINUACAO.
+                - ATENÇÃO (anexos de TFD com timbre próprio): um pedido de TFD/RS quase sempre vem acompanhado de um
+                  LAUDO MÉDICO emitido pela Secretaria de Saúde do estado de ORIGEM do paciente (o estado onde ele
+                  mora, diferente do RS), justificando o procedimento — com cabeçalho/timbre institucional próprio
+                  desse outro estado. Mesmo tendo timbre próprio, esse laudo é um ANEXO do pedido de TFD/RS, não uma
+                  nova solicitação independente — responda CONTINUACAO para ele (mesmo que a categoria dele isolada
+                  seja TFD_OUTROS_ESTADOS). Só responda INICIO para uma página de TFD quando ela for, ela mesma, o
+                  formulário de CADASTRO do RS (título "Solicitação de cadastro para consulta -TFD") ou não tiver
+                  nenhuma relação de conteúdo (paciente, procedimento) com um pedido de TFD que já vinha sendo
+                  descrito nas páginas anteriores.
 
                 Categorias:
                 - TFD_RS: documento de Tratamento Fora de Domicílio (TFD) especificamente do Rio Grande do Sul. A
