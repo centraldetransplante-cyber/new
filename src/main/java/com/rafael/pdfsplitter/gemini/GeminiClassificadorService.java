@@ -1,5 +1,6 @@
 package com.rafael.pdfsplitter.gemini;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
@@ -182,12 +183,13 @@ public class GeminiClassificadorService {
         }
         int ultimaPaginaDecisao = primeiraPaginaDecisao + textosDecisao.size() - 1;
         String prompt = montarPromptAgrupamento(textosContexto, primeiraPaginaContexto, textosDecisao, primeiraPaginaDecisao);
-        int maxOutputTokens = Math.min(8192, 24 * textosDecisao.size() + 256);
+        int maxOutputTokens = Math.min(8192, 40 * textosDecisao.size() + 256);
+        List<String> categoriasValidas = Arrays.stream(Categoria.values()).map(Enum::name).toList();
 
         for (int tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
             try {
                 GeminiResponse resposta = client.gerarConteudo(config.modelo(), config.apiKey(),
-                        GeminiRequest.deTexto(prompt, maxOutputTokens));
+                        GeminiRequest.deJsonAgrupamento(prompt, maxOutputTokens, categoriasValidas));
                 return InterpretadorAgrupamento.interpretar(resposta.primeiroTexto(), primeiraPaginaDecisao, ultimaPaginaDecisao);
             } catch (Exception e) {
                 if (tentativa == MAX_TENTATIVAS) {
@@ -241,10 +243,8 @@ public class GeminiClassificadorService {
 
         sb.append("""
 
-                Responda no formato abaixo, uma linha por página a classificar (nada além disso — sem explicações,
-                sem markdown, sem cabeçalho):
-
-                numero_da_pagina|numero_do_documento|CATEGORIA
+                Responda com um item por página a classificar (nos campos "pagina", "documento" e "categoria" do
+                schema JSON configurado), na mesma ordem em que as páginas foram listadas acima.
 
                 Regras de agrupamento:
                 - Páginas do MESMO documento físico recebem o MESMO numero_do_documento; documentos diferentes têm
@@ -283,14 +283,11 @@ public class GeminiClassificadorService {
                   médico comum.
                 - OUTROS: qualquer outro conteúdo que não se encaixe nas categorias acima.
 
-                Exemplo de resposta válida para uma janela de 5 páginas a classificar, onde as 3 primeiras são o
-                mesmo pedido de TFD/RS (capa do RS + laudo médico de outro estado anexado + um exame anexado) e as
-                2 últimas são exames avulsos e distintos entre si:
-                1|1|TFD_RS
-                2|1|TFD_RS
-                3|1|TFD_RS
-                4|2|EXAMES
-                5|3|EXAMES
+                Exemplo de agrupamento para uma janela de 5 páginas a classificar, onde as 3 primeiras são o mesmo
+                pedido de TFD/RS (capa do RS + laudo médico de outro estado anexado + um exame anexado) e as 2
+                últimas são exames avulsos e distintos entre si: páginas 1, 2 e 3 recebem documento=1 e
+                categoria=TFD_RS; página 4 recebe documento=2 e categoria=EXAMES; página 5 recebe documento=3 e
+                categoria=EXAMES.
                 """);
 
         return sb.toString();

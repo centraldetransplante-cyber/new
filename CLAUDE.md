@@ -78,10 +78,15 @@ once** (`classificador.contexto-paginas-por-janela`, default 10) plus a few page
 before the window (`classificador.contexto-paginas-de-contexto`, default 4, truncated per-page at
 `classificador.contexto-max-caracteres-por-pagina`), and asks it to directly **segment the window into documents** —
 contiguous page ranges belonging to the same physical request — with a category each
-(`GeminiClassificadorService.agrupar` / `montarPromptAgrupamento`). The response is one line per page,
-`numero_da_pagina|numero_do_documento|CATEGORIA`, parsed defensively by `InterpretadorAgrupamento` (a line that
-doesn't match the pattern is skipped, not fatal — a lost line becomes one unresolved page, not a discarded
-response).
+(`GeminiClassificadorService.agrupar` / `montarPromptAgrupamento`). Since 2026-09-16 the call uses Gemini's
+`responseSchema`/`responseMimeType=application/json` (`GeminiRequest.deJsonAgrupamento`) to force a JSON array of
+`{"pagina": N, "documento": N, "categoria": "..."}` — one item per page — instead of a free-text
+`numero|numero|CATEGORIA` line format parsed by regex. `InterpretadorAgrupamento` still parses defensively at the
+*item* level (an item with an unrecognized category or a page outside the window is dropped individually, not
+fatal — same "lost item becomes one unresolved page" philosophy as before); the difference is that a fully
+malformed/truncated response (e.g. hitting `maxOutputTokens` on a very text-heavy window) now fails JSON parsing
+entirely and treats the whole window as unresolved, which the caller already handles as a low-coverage window
+(falls back to keyword classification for that window).
 
 Key pieces:
 - **Windows run sequentially** (not parallel) for now — simpler to reason about correctness-wise; if latency on
@@ -179,6 +184,40 @@ cross-window stitching (`CATEGORIAS_TFD`, currently duplicated as a small `EnumS
 ## Frontend
 
 `index.html` is a single static file with no build step, no framework, and no bundler — inline `<style>`/`<script>`,
-vanilla JS, `XMLHttpRequest` (not `fetch`) specifically to get upload progress events. It loads JSZip from a CDN
-only to list the zip's contents client-side for the result summary (the actual download is a raw blob, not
-JSZip-produced). Edits take effect immediately in `quarkus:dev` — no separate frontend build/watch process.
+vanilla JS, `XMLHttpRequest` (not `fetch`) specifically to get upload progress events. JSZip is vendored locally at
+`vendor/jszip.min.js` (no external CDN dependency since 2026-09-16) only to list the zip's contents client-side for
+the result summary (the actual download is a raw blob, not JSZip-produced). A yellow banner (`#metodoAlerta`)
+warns the user when any page fell back to keyword classification (Gemini unavailable/failed), on top of the
+existing per-page method badges. Edits take effect immediately in `quarkus:dev` — no separate frontend build/watch
+process.
+
+## Tests
+
+`src/test/java` has unit tests for the three services identified as untested in the Antigravity audit:
+`ClassificadorPalavraChaveServiceTest`, `InterpretadorAgrupamentoTest`, and `AgrupadorContextualServiceTest` (the
+last one uses a hand-written `GeminiClassificadorService` subclass as a test double — no mocking framework is a
+project dependency). Run with `./mvnw test`.
+
+## Notes & Collaboration (Antigravity AI 🤝 Claude Code)
+
+- **Audit Review & Fixes**: Antigravity AI performed a code audit (`RELATORIO_BUGS_E_MELHORIAS.md`) and Claude Code
+  successfully reviewed and applied key fixes to production (page-level extraction exception handling, header size
+  limit reduction to 150 pages, Base64 UTF-8 decoding via `TextDecoder` in `index.html`, PDF compression
+  optimization, and GitHub Actions CI deploy workflow).
+- **Two audit findings were false positives, verified 2026-09-16**: (1) "invalid Gemini model
+  `gemini-3.5-flash-lite`" — that model exists (Gemini 3 series, released after the audit's apparent knowledge
+  cutoff); config is correct, left unchanged. (2) "greedy `0*` in the agrupamento regex breaks docId `0`" — tested
+  directly against the JDK regex engine and Java's backtracking handles it correctly (`0*` gives back the digit
+  when the mandatory `\d{1,5}` group needs it). Verify audit findings against the actual running code/behavior
+  before "fixing" them — an AI-generated audit can be wrong, especially about what does/doesn't exist in a fast-
+  moving API surface.
+- **Remaining items from the audit, addressed 2026-09-16**: JSZip vendored locally (was CDN-only), a UI banner for
+  Gemini-fallback pages (was silent, badges only), unit tests added for the three services above, and the
+  agrupamento call migrated to structured JSON output (`responseSchema`) — see "Modo CONTEXTO" above. **Left
+  unchanged on purpose**: the fixed-size `Executors.newFixedThreadPool(8)` in `PdfSplitService` (the audit
+  suggested virtual threads, but the pool's fixed size of 8 is a deliberate rate-limit guard against 429s from the
+  Gemini API in PAGINA mode, not just a thread-overhead optimization — switching to virtual threads would remove
+  that cap); and the compression loop in `comprimirSePreciso` reusing the same `PDDocument` across quality
+  attempts (a documented, deliberate trade-off against the CPU/memory cost of reloading a large PDF from bytes up
+  to 5 times, not an oversight).
+

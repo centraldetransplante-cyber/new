@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Separador de PDF</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="vendor/jszip.min.js"></script>
 <style>
   :root {
     --bg: #f4f6fb;
@@ -348,6 +348,19 @@
     border: 1px solid var(--border);
     background: var(--card);
   }
+  .metodo-alerta {
+    display: none;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: .82rem;
+    line-height: 1.4;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    border: 1px solid #f5c451;
+    background: #fff8e6;
+    color: #7a5400;
+  }
   .metodo-badge .ponto { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .metodo-badge.gemini .ponto { background: #8b5cf6; }
   .metodo-badge.gemini-contexto .ponto { background: #6366f1; }
@@ -453,6 +466,7 @@
         <div class="resultado-erro-msg" id="resultadoErroMsg"></div>
 
         <div class="metodo-resumo" id="metodoResumo" style="display:none">
+          <div class="metodo-alerta" id="metodoAlerta">⚠️ <span id="metodoAlertaTexto"></span></div>
           <div class="metodo-resumo-titulo">Como cada página foi classificada</div>
           <div class="metodo-badges" id="metodoBadges"></div>
           <div class="metodo-detalhe" id="metodoDetalheToggle">Ver por página ▾</div>
@@ -484,6 +498,8 @@
     const resultadoLista = document.getElementById('resultadoLista');
     const resultadoErroMsg = document.getElementById('resultadoErroMsg');
     const metodoResumo = document.getElementById('metodoResumo');
+    const metodoAlerta = document.getElementById('metodoAlerta');
+    const metodoAlertaTexto = document.getElementById('metodoAlertaTexto');
     const metodoBadges = document.getElementById('metodoBadges');
     const metodoDetalheToggle = document.getElementById('metodoDetalheToggle');
     const metodoPaginas = document.getElementById('metodoPaginas');
@@ -575,6 +591,18 @@
       if (!algumUsado) {
         metodoResumo.style.display = 'none';
         return;
+      }
+
+      const totalPaginas = Object.values(resumo).reduce((a, b) => a + b, 0);
+      const qtdFallback = resumo.PALAVRA_CHAVE || 0;
+      if (qtdFallback > 0) {
+        const percentual = totalPaginas > 0 ? Math.round((qtdFallback / totalPaginas) * 100) : 0;
+        metodoAlertaTexto.textContent = qtdFallback === 1
+          ? '1 página não pôde ser classificada pela IA e foi resolvida por palavra-chave (menos confiável). Confira o resultado abaixo.'
+          : qtdFallback + ' páginas (' + percentual + '%) não puderam ser classificadas pela IA e foram resolvidas por palavra-chave (menos confiável). Confira o resultado abaixo.';
+        metodoAlerta.style.display = 'flex';
+      } else {
+        metodoAlerta.style.display = 'none';
       }
 
       Object.keys(INFO_METODO).forEach((chave) => {
