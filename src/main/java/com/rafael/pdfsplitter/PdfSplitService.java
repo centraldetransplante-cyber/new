@@ -5,7 +5,6 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumMap;
-import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,7 +38,7 @@ public class PdfSplitService {
     private static final Logger LOG = Logger.getLogger(PdfSplitService.class);
 
     /** Categorias de TFD que seguem a regra de bloco (capa fixa + páginas de continuação sem texto). */
-    private static final Set<Categoria> CATEGORIAS_TFD = EnumSet.of(Categoria.TFD_RS, Categoria.TFD_OUTROS_ESTADOS);
+    private static final Set<Categoria> CATEGORIAS_TFD = Categoria.CATEGORIAS_TFD;
 
     /** Limite de páginas detalhadas no relatório (o cabeçalho HTTP não pode crescer sem limite). */
     private static final int LIMITE_PAGINAS_NO_RELATORIO = 500;
@@ -89,6 +88,21 @@ public class PdfSplitService {
      * @throws PdfInvalidoException se o arquivo não for um PDF válido, estiver
      *         protegido por senha ou não tiver páginas.
      */
+    /**
+     * Só o literal {@code "PAGINA"} (sem distinção de maiúsculas) ativa o modo antigo — qualquer outro valor,
+     * incluindo um erro de digitação como {@code "PAGINAS"}, usa o modo CONTEXTO (o padrão) silenciosamente, o que
+     * frustraria o propósito de "botão de pânico" dessa config. Por isso avisa em log quando o valor não é
+     * reconhecido, para não mascarar o typo.
+     */
+    private boolean usarModoPagina() {
+        String modo = config.modo();
+        boolean pagina = "PAGINA".equalsIgnoreCase(modo);
+        if (!pagina && !"CONTEXTO".equalsIgnoreCase(modo)) {
+            LOG.warnf("classificador.modo='%s' não reconhecido (esperado CONTEXTO ou PAGINA) - usando CONTEXTO", modo);
+        }
+        return pagina;
+    }
+
     public ResultadoSeparacao separar(File arquivoPdf) throws IOException {
         PDDocument origem;
         try {
@@ -107,7 +121,7 @@ public class PdfSplitService {
 
             List<String> textos = extrairTextos(origem);
             List<PaginaClassificada> classificacoes;
-            if ("PAGINA".equalsIgnoreCase(config.modo())) {
+            if (usarModoPagina()) {
                 // Modo antigo (página a página + heurística de bloco de TFD) — mantido como
                 // "botão de pânico": trocar classificador.modo=PAGINA no Render volta a esse
                 // comportamento sem precisar reimplantar código, se o modo CONTEXTO se mostrar

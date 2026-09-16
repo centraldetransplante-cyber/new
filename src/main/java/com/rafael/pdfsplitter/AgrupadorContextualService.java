@@ -1,7 +1,6 @@
 package com.rafael.pdfsplitter;
 
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 
@@ -26,7 +25,7 @@ public class AgrupadorContextualService {
 
     private static final Logger LOG = Logger.getLogger(AgrupadorContextualService.class);
 
-    private static final Set<Categoria> CATEGORIAS_TFD = EnumSet.of(Categoria.TFD_RS, Categoria.TFD_OUTROS_ESTADOS);
+    private static final Set<Categoria> CATEGORIAS_TFD = Categoria.CATEGORIAS_TFD;
 
     /** Abaixo dessa fração de páginas resolvidas numa janela, a janela inteira é tratada como falha. */
     private static final double COBERTURA_MINIMA = 0.6;
@@ -58,6 +57,7 @@ public class AgrupadorContextualService {
 
         Categoria categoriaAbertaAnterior = null;
         int paginaFinalAbertaAnterior = -1;
+        boolean rsConfirmadoAnterior = false;
 
         int inicioJanela = 0; // 0-based, indice da 1a pagina de decisao da janela
         while (inicioJanela < total) {
@@ -96,20 +96,39 @@ public class AgrupadorContextualService {
                 // Não tenta costurar um bloco de TFD por cima de um trecho que caiu no fallback.
                 categoriaAbertaAnterior = null;
                 paginaFinalAbertaAnterior = -1;
+                rsConfirmadoAnterior = false;
             } else {
                 for (DocumentoDetectado doc : resultado.documentos()) {
-                    Categoria categoriaEfetiva = doc.categoria();
-                    if (categoriaEfetiva == Categoria.TFD_RS
-                            && !algumaPaginaConfirmaRs(normalizados, doc.paginaInicial(), doc.paginaFinal())) {
-                        LOG.warnf("Documento páginas %d-%d marcado TFD_RS pelo Gemini mas nenhuma página bate no "
-                                + "marcador do RS - rebaixando para TFD_OUTROS_ESTADOS", doc.paginaInicial(), doc.paginaFinal());
-                        categoriaEfetiva = Categoria.TFD_OUTROS_ESTADOS;
-                    }
+                    Categoria categoriaBruta = doc.categoria();
 
+                    // Continua o documento aberto na janela anterior se for a categoria de TFD
+                    // que o Gemini deu (ANTES de qualquer rebaixamento) e for contíguo — é essa
+                    // continuidade que decide se um TFD_RS sem marcador próprio (ex.: o laudo
+                    // médico anexado, que não menciona o RS) ainda conta como confirmado por
+                    // herdar a confirmação do documento que ele continua.
                     boolean continuaDocumentoAnterior = categoriaAbertaAnterior != null
                             && doc.paginaInicial() == paginaFinalAbertaAnterior + 1
-                            && categoriaEfetiva == categoriaAbertaAnterior
-                            && CATEGORIAS_TFD.contains(categoriaEfetiva);
+                            && categoriaBruta == categoriaAbertaAnterior
+                            && CATEGORIAS_TFD.contains(categoriaBruta);
+
+                    Categoria categoriaEfetiva = categoriaBruta;
+                    boolean rsConfirmadoAqui = false;
+                    if (categoriaBruta == Categoria.TFD_RS) {
+                        rsConfirmadoAqui = algumaPaginaConfirmaRs(normalizados, doc.paginaInicial(), doc.paginaFinal());
+                        if (!rsConfirmadoAqui && continuaDocumentoAnterior && rsConfirmadoAnterior) {
+                            // Nenhuma página DESTE trecho bate no marcador do RS, mas ele é a
+                            // continuação direta de um documento que já tinha sido confirmado -
+                            // exatamente o caso do laudo médico de outro estado anexado ao pedido
+                            // do RS, que naturalmente não menciona o RS.
+                            rsConfirmadoAqui = true;
+                        }
+                        if (!rsConfirmadoAqui) {
+                            LOG.warnf("Documento páginas %d-%d marcado TFD_RS pelo Gemini mas nenhuma página (nem a "
+                                    + "do documento anterior continuado) bate no marcador do RS - rebaixando para "
+                                    + "TFD_OUTROS_ESTADOS", doc.paginaInicial(), doc.paginaFinal());
+                            categoriaEfetiva = Categoria.TFD_OUTROS_ESTADOS;
+                        }
+                    }
 
                     for (int pagina1based = doc.paginaInicial(); pagina1based <= doc.paginaFinal(); pagina1based++) {
                         int idx = pagina1based - 1;
@@ -124,6 +143,7 @@ public class AgrupadorContextualService {
 
                     paginaFinalAbertaAnterior = doc.paginaFinal();
                     categoriaAbertaAnterior = categoriaEfetiva;
+                    rsConfirmadoAnterior = categoriaEfetiva == Categoria.TFD_RS && rsConfirmadoAqui;
                 }
 
                 for (int paginaNr : resultado.paginasNaoResolvidas()) {
@@ -133,9 +153,14 @@ public class AgrupadorContextualService {
                     }
                     if (idx > 0 && categoriaFinal[idx - 1] != null) {
                         // Reparo simples: buraco de 1-2 paginas no meio de um bloco ja identificado
-                        // provavelmente e continuacao dele (regra do negocio: nao perder pagina).
+                        // provavelmente e continuacao dele (regra do negocio: nao perder pagina) -
+                        // só rotula como "regra de bloco TFD" quando a categoria herdada realmente
+                        // for de TFD, senão o relatório mostraria esse rótulo numa página que não
+                        // tem nada a ver com TFD.
                         categoriaFinal[idx] = categoriaFinal[idx - 1];
-                        metodoFinal[idx] = MetodoClassificacao.REGRA_BLOCO_TFD;
+                        metodoFinal[idx] = CATEGORIAS_TFD.contains(categoriaFinal[idx - 1])
+                                ? MetodoClassificacao.REGRA_BLOCO_TFD
+                                : MetodoClassificacao.GEMINI_CONTEXTO;
                     } else {
                         categoriaFinal[idx] = normalizados.get(idx).isBlank()
                                 ? Categoria.OUTROS
