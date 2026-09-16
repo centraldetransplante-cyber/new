@@ -32,6 +32,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rafael.pdfsplitter.gemini.ClassificacaoIa;
 import com.rafael.pdfsplitter.gemini.GeminiClassificadorService;
 
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 
 @ApplicationScoped
@@ -45,17 +46,31 @@ public class PdfSplitService {
     /** Limite de páginas detalhadas no relatório (o cabeçalho HTTP não pode crescer sem limite). */
     private static final int LIMITE_PAGINAS_NO_RELATORIO = 500;
 
-    /** Tamanho máximo do pool usado para paralelizar as chamadas ao Gemini (uma por página). */
+    /** Tamanho do pool compartilhado usado para paralelizar as chamadas ao Gemini (uma por página). */
     private static final int MAX_PARALELISMO_CLASSIFICACAO = 8;
 
     private final ClassificadorConfig config;
     private final GeminiClassificadorService geminiService;
     private final ObjectMapper objectMapper;
 
+    /**
+     * Pool compartilhado entre todas as requisições (não um pool novo por
+     * upload) — criar/destruir 8 threads a cada PDF enviado multiplicaria o
+     * overhead de memória exatamente no ambiente (Render free tier) que já é
+     * limitado, e é justamente por causa dessa limitação que o resto do
+     * código evita bufferizar o PDF inteiro em memória.
+     */
+    private final ExecutorService executorClassificacao = Executors.newFixedThreadPool(MAX_PARALELISMO_CLASSIFICACAO);
+
     public PdfSplitService(ClassificadorConfig config, GeminiClassificadorService geminiService, ObjectMapper objectMapper) {
         this.config = config;
         this.geminiService = geminiService;
         this.objectMapper = objectMapper;
+    }
+
+    @PreDestroy
+    void encerrar() {
+        executorClassificacao.shutdown();
     }
 
     /**
@@ -131,30 +146,24 @@ public class PdfSplitService {
             textos.add(stripper.getText(documento));
         }
 
-        int paralelismo = Math.max(1, Math.min(MAX_PARALELISMO_CLASSIFICACAO, totalPaginas));
-        ExecutorService executor = Executors.newFixedThreadPool(paralelismo);
-        try {
-            List<Future<PaginaClassificada>> futuros = new ArrayList<>(totalPaginas);
-            for (String texto : textos) {
-                Callable<PaginaClassificada> tarefa = () -> classificarTexto(texto);
-                futuros.add(executor.submit(tarefa));
-            }
-
-            List<PaginaClassificada> resultado = new ArrayList<>(totalPaginas);
-            for (Future<PaginaClassificada> futuro : futuros) {
-                try {
-                    resultado.add(futuro.get());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Classificação interrompida", e);
-                } catch (ExecutionException e) {
-                    throw new IOException("Falha ao classificar página", e.getCause());
-                }
-            }
-            return resultado;
-        } finally {
-            executor.shutdown();
+        List<Future<PaginaClassificada>> futuros = new ArrayList<>(totalPaginas);
+        for (String texto : textos) {
+            Callable<PaginaClassificada> tarefa = () -> classificarTexto(texto);
+            futuros.add(executorClassificacao.submit(tarefa));
         }
+
+        List<PaginaClassificada> resultado = new ArrayList<>(totalPaginas);
+        for (Future<PaginaClassificada> futuro : futuros) {
+            try {
+                resultado.add(futuro.get());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Classificação interrompida", e);
+            } catch (ExecutionException e) {
+                throw new IOException("Falha ao classificar página", e.getCause());
+            }
+        }
+        return resultado;
     }
 
     /**
@@ -295,9 +304,12 @@ public class PdfSplitService {
                 continue;
             }
 
-            puxarCapaParaTras(classificacoes, i, categoriaDoBloco, tamanhoBloco);
+            int puxadasParaTras = puxarCapaParaTras(classificacoes, i, categoriaDoBloco, tamanhoBloco);
 
-            int fimBloco = Math.min(totalPaginas, i + tamanhoBloco);
+            // O total de páginas do bloco (capa puxada pra trás + gatilho +
+            // continuação pra frente) não pode passar de tamanhoBloco, senão
+            // um bloco de 3 páginas configurado vira um de até 5 na prática.
+            int fimBloco = Math.min(totalPaginas, i + tamanhoBloco - puxadasParaTras);
             for (int j = i + 1; j < fimBloco; j++) {
                 if (deveInterromperBloco(categoriaDoBloco, classificacoes.get(j), original.get(j))) {
                     break;
@@ -316,12 +328,14 @@ public class PdfSplitService {
      * caiu em OUTROS por falta de sinal próprio. Busca páginas OUTROS logo
      * antes do gatilho e absorve no mesmo bloco também, senão a capa se
      * perde. Só puxa páginas que hoje estão em OUTROS (nunca rouba página já
-     * absorvida por outro bloco).
+     * absorvida por outro bloco). Devolve quantas páginas foram puxadas, para
+     * que a extensão pra frente desconte esse tanto e o bloco inteiro não
+     * ultrapasse tamanhoBloco páginas no total.
      */
-    private void puxarCapaParaTras(List<PaginaClassificada> classificacoes, int indiceGatilho,
+    private int puxarCapaParaTras(List<PaginaClassificada> classificacoes, int indiceGatilho,
             Categoria categoriaDoBloco, int tamanhoBloco) {
         if (!Boolean.FALSE.equals(classificacoes.get(indiceGatilho).getInicioDocumento())) {
-            return;
+            return 0;
         }
         int k = indiceGatilho - 1;
         int puxadas = 0;
@@ -331,6 +345,7 @@ public class PdfSplitService {
             k--;
             puxadas++;
         }
+        return puxadas;
     }
 
     /**

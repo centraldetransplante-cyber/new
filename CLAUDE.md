@@ -78,11 +78,11 @@ locally instead of falling back to keywords.
    `classificador.tfd-cabecalho-novo-documento` in `application.properties` before touching this — it exists
    because of a real production bug: a genuine TFD/RS continuation page (e.g. a checklist justifying the request)
    naturally mentions phrases like "tratamento fora de domicílio" in body text, which the broad
-   `classificador.tfd-outros-estados` list matches, wrongly signaling "new document starts here" and truncating the
+   `classificador.tfd-termo-generico` list matches, wrongly signaling "new document starts here" and truncating the
    block. The fix uses a two-tier signal: Gemini's explicit `INICIO`/`CONTINUACAO` verdict when available (trusted
    over keywords), else a match against the *narrow*, header-only `tfd-cabecalho-novo-documento` list. Never widen
    that list with anything that could plausibly appear in running prose — it exists specifically to be stricter
-   than `tfd-outros-estados`.
+   than `tfd-termo-generico`.
 
    `TFD_RS` vs `TFD_OUTROS_ESTADOS` is itself a hard business requirement, not a nice-to-have: TFD/RS means
    *specifically* Rio Grande do Sul's own form. The keyword fallback (`classificarPorPalavraChave`) requires BOTH a

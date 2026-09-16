@@ -53,7 +53,7 @@ public interface ClassificadorConfig {
      *
      * Usados só para decidir se a extensão do bloco de TFD deve parar naquela
      * página, nunca para classificar. É preciso uma lista separada porque
-     * {@link #tfdOutrosEstados()} é propositalmente genérica ("tfd",
+     * {@link #tfdTermoGenerico()} é propositalmente genérica ("tfd",
      * "tratamento fora de domicilio"...) e esses termos aparecem no texto
      * corrido das páginas de CONTINUAÇÃO do próprio formulário do RS, o que
      * fazia o bloco ser cortado no meio.
