@@ -15,6 +15,8 @@ class ClassificadorPalavraChaveServiceTest {
     private static final List<String> PROTOCOLO = List.of("protocolo de encaminhamento");
     private static final List<String> EXAMES = List.of("exame", "laudo");
     private static final List<String> DOCUMENTOS = List.of("rg", "cpf", "certidao");
+    private static final List<String> CARIMBO_PROTOCOLO = List.of("inserido ao protocolo", "download realizado",
+            "a autenticidade deste documento pode ser validada", "eprotocolo", "validardocumento");
 
     private final ClassificadorConfig config = new ClassificadorConfig() {
         @Override public List<String> tfdRsMarcador() { return RS_MARCADOR; }
@@ -30,6 +32,8 @@ class ClassificadorPalavraChaveServiceTest {
         @Override public int contextoPaginasDeContexto() { return 4; }
         @Override public int contextoMaxCaracteresPorPagina() { return 2500; }
         @Override public int tamanhoMaximoArquivoMb() { return 10; }
+        @Override public List<String> contextoCarimboProtocoloPadroes() { return CARIMBO_PROTOCOLO; }
+        @Override public int contextoMinCaracteresConteudoUtil() { return 120; }
     };
 
     private final ClassificadorPalavraChaveService classificador = new ClassificadorPalavraChaveService(config);
@@ -83,5 +87,33 @@ class ClassificadorPalavraChaveServiceTest {
     void normalizarRemoveAcentosEDeixaMinusculo() {
         assertEquals("tratamento fora de domicilio", classificador.normalizar("Tratamento Fora de Domicílio"));
         assertEquals("", classificador.normalizar(null));
+    }
+
+    @Test
+    void paginaSoComCarimboDeProtocoloEPobre() {
+        // Caso real (2026-09-17): anexo escaneado sem OCR onde só o carimbo do sistema de
+        // protocolo eletrônico foi capturado - tem texto (não é isBlank()), mas não diz nada
+        // sobre a categoria do documento.
+        String texto = classificador.normalizar(
+                "Inserido ao protocolo 26.255.858-4 por: Tais Candiotto de Lima em: 15/07/2026 14:31. A "
+                        + "autenticidade deste documento pode ser validada no endereço: "
+                        + "https://www.eprotocolo.pr.gov.br/spiweb/validarDocumento com o código: "
+                        + "2535f4424b1ef97163e5de9956afd911");
+        assertTrue(classificador.paginaPobre(texto));
+    }
+
+    @Test
+    void paginaComConteudoClinicoCurtoNaoEPobre() {
+        String texto = classificador.normalizar(
+                "Queixa principal: dor cronica lombar ha 6 meses, sem melhora com anti-inflamatorios, "
+                        + "paciente refere piora progressiva e dificuldade de deambulacao");
+        assertFalse(classificador.paginaPobre(texto));
+    }
+
+    @Test
+    void textoVazioOuNuloEPobre() {
+        assertTrue(classificador.paginaPobre(""));
+        assertTrue(classificador.paginaPobre("   "));
+        assertTrue(classificador.paginaPobre(null));
     }
 }

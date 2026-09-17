@@ -112,4 +112,23 @@ public interface ClassificadorConfig {
      */
     @WithDefault("10")
     int tamanhoMaximoArquivoMb();
+
+    /**
+     * Frases de carimbo/boilerplate (protocolo eletrônico, assinatura de download, validação de autenticidade)
+     * removidas antes de decidir se uma página é "pobre" (ver {@link #contextoMinCaracteresConteudoUtil()}) — sem
+     * isso, uma página só com esse carimbo seria contada como "com conteúdo" só por ter texto, quando na prática
+     * não diz nada sobre a categoria do documento (é o mesmo carimbo em toda página de um protocolo eletrônico,
+     * RS ou de qualquer outro estado).
+     */
+    List<String> contextoCarimboProtocoloPadroes();
+
+    /**
+     * Uma página do modo CONTEXTO é considerada "pobre" (sem conteúdo real, provavelmente um anexo escaneado sem
+     * OCR do qual só o carimbo do sistema de protocolo foi capturado) quando, depois de remover os padrões de
+     * {@link #contextoCarimboProtocoloPadroes()}, sobram menos letras do que este limite — ver
+     * {@code AgrupadorContextualService} (absorção de páginas pobres num bundle de TFD aberto) e o guard de RS
+     * (não fabrica {@code TFD_OUTROS_ESTADOS} a partir de uma página pobre sem bundle aberto).
+     */
+    @WithDefault("120")
+    int contextoMinCaracteresConteudoUtil();
 }

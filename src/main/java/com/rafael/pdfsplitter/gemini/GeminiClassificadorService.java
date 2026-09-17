@@ -265,6 +265,15 @@ public class GeminiClassificadorService {
                 antes — dê a ele o MESMO numero_do_documento da capa do RS, não abra um documento novo para ele,
                 mesmo que olhando SÓ para aquela página ela pareça um documento de TFD_OUTROS_ESTADOS independente.
 
+                IMPORTANTE sobre páginas quase em branco: um pedido de TFD/RS também costuma vir acompanhado de
+                anexos ESCANEADOS sem OCR (exames, laudos em imagem) — o texto extraído dessas páginas pode ser
+                quase nada, às vezes só um carimbo de sistema de protocolo eletrônico (com URL de validação,
+                código hexadecimal, nome de quem fez o download). Ausência de conteúdo NÃO é evidência de nada —
+                NUNCA escolha TFD_OUTROS_ESTADOS (ou qualquer categoria) só porque a página está "quase vazia". Se
+                a página anterior fazia parte de um documento aberto, dê a ela o MESMO numero_do_documento e a
+                MESMA categoria desse documento; só abra um documento novo se a própria página tiver conteúdo
+                claro que justifique isso.
+
                 Categorias possíveis (a categoria vale para o DOCUMENTO inteiro, decidida pela página que melhor o
                 identifica, normalmente a capa):
                 - TFD_RS: pedido de Tratamento Fora de Domicílio (TFD) do Rio Grande do Sul. Em ALGUMA página do
@@ -272,8 +281,9 @@ public class GeminiClassificadorService {
                   ESTADUAL DE SAÚDE", "DEPARTAMENTO DE REGULAÇÃO ESTADUAL", "CENTRAL ESTADUAL DE TRANSPLANTES", ou o
                   título "Solicitação de cadastro para consulta -TFD". Sem esse marcador claro, NÃO é TFD_RS mesmo
                   que fale de TFD.
-                - TFD_OUTROS_ESTADOS: pedido de TFD igual em estrutura e finalidade, mas SEM nenhum marcador do RS
-                  (de outro estado, ou sem indicação clara de estado).
+                - TFD_OUTROS_ESTADOS: pedido de TFD igual em estrutura e finalidade, mas que MOSTRA claramente ser
+                  de outro estado (ou pelo menos mostra conteúdo real de um pedido de TFD) SEM nenhum marcador do
+                  RS. A mera ausência de texto/conteúdo numa página NÃO é motivo para esta categoria.
                 - PROTOCOLO_ENCAMINHAMENTO: protocolo de encaminhamento entre unidades/serviços de saúde (não
                   confundir com um encaminhamento médico comum, que é DOCUMENTOS).
                 - EXAMES: pedidos, laudos ou resultados de exames médicos avulsos (sangue, imagem, etc.) — que NÃO

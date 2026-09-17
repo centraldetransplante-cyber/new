@@ -79,4 +79,30 @@ public class ClassificadorPalavraChaveService {
                 .replaceAll("\\p{M}", "");
         return semAcento.toLowerCase();
     }
+
+    private static final Pattern LETRAS = Pattern.compile("[a-z]");
+
+    /**
+     * Uma página "pobre" tem, na prática, conteúdo zero: depois de remover as frases de carimbo/boilerplate de
+     * {@link ClassificadorConfig#contextoCarimboProtocoloPadroes()} (carimbo de protocolo eletrônico, assinatura
+     * de download, validação de autenticidade — presentes em toda página de um processo digital, RS ou de
+     * qualquer outro estado, e que por isso não dizem nada sobre a categoria do documento), sobram menos letras do
+     * que {@link ClassificadorConfig#contextoMinCaracteresConteudoUtil()}.
+     *
+     * Não é o mesmo que "sem texto" ({@code isBlank()}): uma página só com o carimbo TEM texto (às vezes 200+
+     * caracteres, incluindo o código de validação em hexadecimal), mas não tem nenhum sinal de categoria — é
+     * exatamente esse tipo de página, comum em anexos escaneados sem OCR, que causou um pedido de TFD/RS real
+     * saindo com anexos em {@code tfd_outros_estados.pdf} (ver AgrupadorContextualService e CLAUDE.md).
+     */
+    public boolean paginaPobre(String textoNormalizado) {
+        if (textoNormalizado == null || textoNormalizado.isBlank()) {
+            return true;
+        }
+        String semCarimbo = textoNormalizado;
+        for (String padrao : config.contextoCarimboProtocoloPadroes()) {
+            semCarimbo = semCarimbo.replace(normalizar(padrao), " ");
+        }
+        long letras = LETRAS.matcher(semCarimbo).results().count();
+        return letras < config.contextoMinCaracteresConteudoUtil();
+    }
 }
