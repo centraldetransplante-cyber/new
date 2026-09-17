@@ -180,18 +180,15 @@ public class AgrupadorContextualService {
                         // "encaminhamento" no meio do texto corrido) não pode ser arrancado do bundle por isso.
                         if (categoriaBruta == Categoria.TFD_RS && !autoconfirmaRs && todasPaginasPobres
                                 && temSinalDeCategoriaPropria) {
-                            // Palavra-chave de RG/CPF/protocolo própria vence mesmo quando o Gemini deu a mesma
-                            // categoria bruta que um documento anterior confirmado (o que herdaria a confirmação
-                            // abaixo) - um RG anexado não vira TFD_RS só porque está contíguo e o Gemini repetiu a
-                            // categoria por engano. NUNCA vence, porém, quando a própria página se autoconfirma
-                            // como RS (marcador do RS de verdade) - um sinal de conteúdo real sempre pesa mais que
-                            // uma correspondência de palavra-chave incidental.
-                            categoriaEfetiva = categoriaAutoEvidente;
-                            rsConfirmadoAqui = false;
-                            metodoForcado = MetodoClassificacao.PALAVRA_CHAVE;
-                            LOG.infof("Documento páginas %d-%d marcado TFD_RS pelo Gemini mas tem palavra-chave "
-                                    + "própria de %s, classificando como tal", doc.paginaInicial(), doc.paginaFinal(),
-                                    categoriaAutoEvidente);
+                            // Bug real corrigido em 2026-09-17: isto arrancava o DOCUMENTO INTEIRO (podendo ter
+                            // várias páginas) do bundle TFD_RS só porque UMA página dele (ex.: um RG anexado) batia
+                            // uma palavra-chave própria - perdendo páginas legítimas do bundle (laudo médico, exames)
+                            // que não tinham nenhum sinal próprio e só estavam ali por estarem contíguas. Agora
+                            // reroteia só a(s) página(s) que de fato batem a palavra-chave; as demais mantêm a
+                            // continuidade do bundle (se houver um aberto) através dessa interrupção pontual.
+                            reroteamentoPorPaginaPropria(doc, normalizados, bundleTfdAberto ? estadoAnterior : null,
+                                    categoriaFinal, metodoFinal, estadoPorPagina, total);
+                            continue;
                         } else if (categoriaBruta == Categoria.TFD_RS) {
                             if (!rsConfirmadoAqui && continuaMesmaCategoriaBruta && estadoAnterior.rsConfirmado()) {
                                 // Nenhuma página DESTE trecho bate no marcador do RS, mas ele é a continuação
@@ -207,7 +204,7 @@ public class AgrupadorContextualService {
                                     // absorverNoBundle acima) - fabricar TFD_OUTROS_ESTADOS a partir de zero
                                     // conteúdo seria uma afirmação de negócio falsa; OUTROS é honesto.
                                     categoriaEfetiva = Categoria.OUTROS;
-                                    metodoForcado = MetodoClassificacao.PALAVRA_CHAVE;
+                                    metodoForcado = MetodoClassificacao.REGRA_JAVA;
                                     LOG.warnf("Documento páginas %d-%d marcado TFD_RS pelo Gemini mas sem conteúdo "
                                             + "real (só carimbo/boilerplate) e sem bundle RS aberto pra herdar - "
                                             + "classificando como OUTROS em vez de TFD_OUTROS_ESTADOS",
@@ -230,7 +227,7 @@ public class AgrupadorContextualService {
                             // temSinalDeCategoriaPropria bloqueou a absorção, e nesse caso É pra rerotear pra
                             // categoria própria mesmo com bundle aberto.
                             categoriaEfetiva = temSinalDeCategoriaPropria ? categoriaAutoEvidente : Categoria.OUTROS;
-                            metodoForcado = MetodoClassificacao.PALAVRA_CHAVE;
+                            metodoForcado = MetodoClassificacao.REGRA_JAVA;
                             LOG.warnf("Documento páginas %d-%d marcado TFD_OUTROS_ESTADOS pelo Gemini mas sem "
                                     + "conteúdo real (só carimbo/boilerplate) - classificando como %s",
                                     doc.paginaInicial(), doc.paginaFinal(), categoriaEfetiva);
@@ -292,6 +289,45 @@ public class AgrupadorContextualService {
             saida.add(new PaginaClassificada(categoria, metodo, normalizados.get(i), null));
         }
         return saida;
+    }
+
+    /**
+     * Reroteia SÓ as páginas do documento que individualmente batem uma palavra-chave de categoria própria
+     * (RG/CPF/protocolo de encaminhamento), em vez de arrancar o documento inteiro do bundle por causa de uma
+     * única página assim (bug real: um RG anexado no meio de um laudo médico virava DOCUMENTOS para todas as
+     * páginas do trecho, inclusive as que não tinham nenhum sinal próprio). Páginas sem sinal próprio herdam a
+     * continuação do bundle aberto ({@code estadoBundleAberto}, já {@code null} se não houver um) — inclusive
+     * preservando esse estado nas próprias páginas rereoteadas, para a página seguinte ainda enxergar o bundle
+     * aberto através dessa interrupção pontual (reduz o gap documentado de "RG interrompe uma sequência de TFD").
+     */
+    private void reroteamentoPorPaginaPropria(DocumentoDetectado doc, List<String> normalizados,
+            EstadoBundle estadoBundleAberto, Categoria[] categoriaFinal, MetodoClassificacao[] metodoFinal,
+            EstadoBundle[] estadoPorPagina, int total) {
+        for (int pagina1based = doc.paginaInicial(); pagina1based <= doc.paginaFinal(); pagina1based++) {
+            int idx = pagina1based - 1;
+            if (idx < 0 || idx >= total) {
+                continue;
+            }
+            Categoria categoriaPropriaDaPagina = categoriaAutoEvidenteOuNull(normalizados, pagina1based, pagina1based);
+            if (categoriaPropriaDaPagina != null) {
+                categoriaFinal[idx] = categoriaPropriaDaPagina;
+                metodoFinal[idx] = MetodoClassificacao.REGRA_JAVA;
+                estadoPorPagina[idx] = estadoBundleAberto;
+                LOG.infof("Página %d marcada TFD_RS pelo Gemini mas tem palavra-chave própria de %s, classificando "
+                        + "como tal sem arrancar o resto do documento do bundle", pagina1based, categoriaPropriaDaPagina);
+            } else if (estadoBundleAberto != null) {
+                categoriaFinal[idx] = estadoBundleAberto.categoriaEfetiva();
+                metodoFinal[idx] = MetodoClassificacao.REGRA_BLOCO_TFD;
+                estadoPorPagina[idx] = estadoBundleAberto;
+            } else {
+                // Sem bundle aberto pra herdar e sem palavra-chave própria NESTA página - mesma decisão
+                // conservadora que o caminho antigo tomava pro documento inteiro (categoria auto-evidente olhando
+                // todas as páginas dele; garantidamente não-nula aqui, pois foi assim que chegamos a este método).
+                categoriaFinal[idx] = categoriaAutoEvidenteOuNull(normalizados, doc.paginaInicial(), doc.paginaFinal());
+                metodoFinal[idx] = MetodoClassificacao.REGRA_JAVA;
+                estadoPorPagina[idx] = null;
+            }
+        }
     }
 
     /**

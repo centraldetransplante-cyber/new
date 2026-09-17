@@ -11,6 +11,8 @@ import com.rafael.pdfsplitter.Categoria;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 
 @ApplicationScoped
 public class GeminiClassificadorService {
@@ -51,9 +53,11 @@ public class GeminiClassificadorService {
                 GeminiResponse resposta = client.gerarConteudo(config.modelo(), config.apiKey(), GeminiRequest.deTexto(prompt));
                 return interpretarResposta(resposta.primeiroTexto());
             } catch (Exception e) {
-                if (tentativa == MAX_TENTATIVAS) {
-                    LOG.warn("Falha ao classificar página com Gemini após " + MAX_TENTATIVAS
-                            + " tentativa(s), usando fallback por palavra-chave", e);
+                boolean permanente = erroPermanente(e);
+                if (permanente || tentativa == MAX_TENTATIVAS) {
+                    LOG.warnf("Falha ao classificar página com Gemini (%s%s) - usando fallback por palavra-chave",
+                            detalheErro(e), permanente ? ", erro não é passageiro, não tentando de novo"
+                                    : " após " + MAX_TENTATIVAS + " tentativa(s)");
                     return null;
                 }
                 LOG.debug("Falha ao classificar página com Gemini, tentando novamente", e);
@@ -66,6 +70,41 @@ public class GeminiClassificadorService {
             }
         }
         return null;
+    }
+
+    /**
+     * Um HTTP 4xx (exceto 408/429, que costumam ser passageiros - timeout no gateway, limite de taxa) indica um
+     * problema de configuração/requisição que não se resolve tentando de novo (chave inválida, modelo inexistente,
+     * schema rejeitado) - retentar só atrasa o fallback em ~400ms à toa. Erros de rede/timeout (sem
+     * {@link Response} nenhuma) e 5xx continuam sendo tratados como passageiros.
+     */
+    private boolean erroPermanente(Exception e) {
+        if (!(e instanceof WebApplicationException wae) || wae.getResponse() == null) {
+            return false;
+        }
+        int status = wae.getResponse().getStatus();
+        return status >= 400 && status < 500 && status != 408 && status != 429;
+    }
+
+    /**
+     * Antes disso, um erro HTTP do Gemini (chave inválida, modelo não encontrado, schema rejeitado, quota
+     * excedida...) só aparecia no log como a mensagem genérica do RESTEasy ("HTTP 400 Bad Request"), nunca com o
+     * {@code error.message} de verdade que o Google devolve no corpo - tornando praticamente impossível distinguir,
+     * só pelo log, qual das várias causas possíveis de "100% fallback" realmente aconteceu numa execução real.
+     */
+    private String detalheErro(Exception e) {
+        if (e instanceof WebApplicationException wae && wae.getResponse() != null) {
+            Response resposta = wae.getResponse();
+            String corpo;
+            try {
+                corpo = resposta.hasEntity() ? resposta.readEntity(String.class) : null;
+            } catch (Exception ignorada) {
+                corpo = null;
+            }
+            String resumo = corpo == null || corpo.isBlank() ? "" : ": " + corpo.substring(0, Math.min(corpo.length(), 500));
+            return "HTTP " + resposta.getStatus() + resumo;
+        }
+        return e.getClass().getSimpleName() + (e.getMessage() != null ? ": " + e.getMessage() : "");
     }
 
     private String montarPrompt(String textoPagina) {
@@ -183,18 +222,34 @@ public class GeminiClassificadorService {
         }
         int ultimaPaginaDecisao = primeiraPaginaDecisao + textosDecisao.size() - 1;
         String prompt = montarPromptAgrupamento(textosContexto, primeiraPaginaContexto, textosDecisao, primeiraPaginaDecisao);
-        int maxOutputTokens = Math.min(8192, 40 * textosDecisao.size() + 256);
+        // Piso alto o bastante pra sobrar espaço de saída mesmo com thinkingBudget=0 (ver GeminiRequest.ThinkingConfig);
+        // o valor antigo (40*n+256) já causou resposta vazia/truncada em janelas maiores sem gerar nenhuma exceção.
+        int maxOutputTokens = Math.min(8192, 60 * textosDecisao.size() + 2048);
         List<String> categoriasValidas = Arrays.stream(Categoria.values()).map(Enum::name).toList();
 
         for (int tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
             try {
                 GeminiResponse resposta = client.gerarConteudo(config.modelo(), config.apiKey(),
                         GeminiRequest.deJsonAgrupamento(prompt, maxOutputTokens, categoriasValidas));
-                return InterpretadorAgrupamento.interpretar(resposta.primeiroTexto(), primeiraPaginaDecisao, ultimaPaginaDecisao);
+                String texto = resposta.primeiroTexto();
+                if (texto.isBlank()) {
+                    // Sem exceção nenhuma (a chamada HTTP teve sucesso) - mas sem conteúdo pra parsear. Acontece
+                    // sobretudo quando o modelo esgota maxOutputTokens "pensando" (finishReason=MAX_TOKENS) antes
+                    // de emitir o JSON; sem logar isso, esse caso ficava indistinguível de qualquer outra causa de
+                    // fallback (silêncio total no log, ao contrário de toda falha de rede/HTTP).
+                    LOG.warnf("Gemini devolveu resposta vazia para a janela de páginas %d-%d (finishReason=%s) - "
+                            + "tratando como não resolvida", primeiraPaginaDecisao, ultimaPaginaDecisao,
+                            resposta.primeiroFinishReason());
+                    return null;
+                }
+                return InterpretadorAgrupamento.interpretar(texto, primeiraPaginaDecisao, ultimaPaginaDecisao);
             } catch (Exception e) {
-                if (tentativa == MAX_TENTATIVAS) {
-                    LOG.warn("Falha ao agrupar janela de páginas " + primeiraPaginaDecisao + "-" + ultimaPaginaDecisao
-                            + " com Gemini após " + MAX_TENTATIVAS + " tentativa(s), usando fallback por palavra-chave", e);
+                boolean permanente = erroPermanente(e);
+                if (permanente || tentativa == MAX_TENTATIVAS) {
+                    LOG.warnf("Falha ao agrupar janela de páginas %d-%d com Gemini (%s%s) - usando fallback por "
+                            + "palavra-chave", primeiraPaginaDecisao, ultimaPaginaDecisao, detalheErro(e),
+                            permanente ? ", erro não é passageiro, não tentando de novo"
+                                    : " após " + MAX_TENTATIVAS + " tentativa(s)");
                     return null;
                 }
                 LOG.debug("Falha ao agrupar janela com Gemini, tentando novamente", e);

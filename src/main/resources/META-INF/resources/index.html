@@ -365,6 +365,7 @@
   .metodo-badge.gemini .ponto { background: #8b5cf6; }
   .metodo-badge.gemini-contexto .ponto { background: #6366f1; }
   .metodo-badge.palavra-chave .ponto { background: #f59e0b; }
+  .metodo-badge.regra-java .ponto { background: #10b981; }
   .metodo-badge.regra-bloco .ponto { background: #06b6d4; }
   .metodo-badge.sem-texto .ponto { background: #ef4444; }
 
@@ -411,7 +412,7 @@
   <div class="wrap">
     <span class="eyebrow">PDF Splitter</span>
     <h1>Separador de PDF</h1>
-    <p class="sub">Envie um PDF e ele será dividido automaticamente por categoria (via IA, com fallback por palavra-chave).</p>
+    <p class="sub">Envie um ou mais PDFs e eles serão divididos automaticamente por categoria (via IA, com fallback por palavra-chave).</p>
 
     <div class="card">
       <div class="categorias-preview">
@@ -424,12 +425,12 @@
       </div>
 
       <label class="drop" id="drop">
-        <input type="file" id="arquivo" accept="application/pdf">
+        <input type="file" id="arquivo" accept="application/pdf" multiple>
         <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
           <path d="M12 3v12m0 0-4-4m4 4 4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <div class="drop-texto">Clique ou arraste um PDF aqui</div>
-        <div class="drop-subtexto">Apenas arquivos .pdf</div>
+        <div class="drop-texto">Clique ou arraste um ou mais PDFs aqui</div>
+        <div class="drop-subtexto">Apenas arquivos .pdf — pode selecionar vários de uma vez</div>
       </label>
 
       <div class="arquivo-info" id="arquivoInfo">
@@ -508,6 +509,7 @@
       GEMINI_CONTEXTO: { classe: 'gemini-contexto', cor: '#6366f1', rotulo: 'Gemini com contexto (IA)' },
       GEMINI: { classe: 'gemini', cor: '#8b5cf6', rotulo: 'Gemini (IA)' },
       PALAVRA_CHAVE: { classe: 'palavra-chave', cor: '#f59e0b', rotulo: 'Palavra-chave (fallback)' },
+      REGRA_JAVA: { classe: 'regra-java', cor: '#10b981', rotulo: 'Regra de negócio (IA funcionou)' },
       REGRA_BLOCO_TFD: { classe: 'regra-bloco', cor: '#06b6d4', rotulo: 'Regra de bloco TFD' },
       SEM_TEXTO: { classe: 'sem-texto', cor: '#ef4444', rotulo: 'Sem texto (provável scan sem OCR)' }
     };
@@ -520,7 +522,7 @@
     const ICONE_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     const ICONE_ERRO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg>';
 
-    let arquivoSelecionado = null;
+    let arquivosSelecionados = [];
 
     function formatarTamanho(bytes) {
       if (bytes < 1024) return bytes + ' B';
@@ -534,15 +536,22 @@
       resultadoErroMsg.textContent = '';
     }
 
-    function selecionar(arquivo) {
-      if (!arquivo) return;
-      if (arquivo.type !== 'application/pdf') {
-        mostrarErro('Selecione um arquivo PDF.');
+    function selecionar(arquivos) {
+      const lista = Array.from(arquivos || []);
+      if (lista.length === 0) return;
+      if (lista.some(arquivo => arquivo.type !== 'application/pdf')) {
+        mostrarErro('Selecione apenas arquivos PDF.');
         return;
       }
-      arquivoSelecionado = arquivo;
-      nomeEl.textContent = arquivo.name;
-      tamanhoEl.textContent = formatarTamanho(arquivo.size);
+      arquivosSelecionados = lista;
+      const tamanhoTotal = lista.reduce((soma, arquivo) => soma + arquivo.size, 0);
+      if (lista.length === 1) {
+        nomeEl.textContent = lista[0].name;
+      } else {
+        nomeEl.textContent = lista.length + ' arquivos selecionados';
+        nomeEl.title = lista.map(a => a.name).join(', ');
+      }
+      tamanhoEl.textContent = formatarTamanho(tamanhoTotal);
       arquivoInfo.classList.add('ativo');
       drop.style.display = 'none';
       botao.disabled = false;
@@ -550,15 +559,16 @@
     }
 
     function limparSelecao() {
-      arquivoSelecionado = null;
+      arquivosSelecionados = [];
       input.value = '';
+      nomeEl.title = '';
       arquivoInfo.classList.remove('ativo');
       drop.style.display = 'block';
       botao.disabled = true;
       limparResultado();
     }
 
-    input.addEventListener('change', () => selecionar(input.files[0]));
+    input.addEventListener('change', () => selecionar(input.files));
     removerBtn.addEventListener('click', limparSelecao);
     enviarOutroBtn.addEventListener('click', () => {
       const temResultadoDeSucesso = resultado.classList.contains('ok');
@@ -573,7 +583,7 @@
     drop.addEventListener('drop', (e) => {
       e.preventDefault();
       drop.classList.remove('dragover');
-      selecionar(e.dataTransfer.files[0]);
+      selecionar(e.dataTransfer.files);
     });
 
     function mostrarErro(mensagem) {
@@ -712,7 +722,7 @@
     }
 
     botao.addEventListener('click', () => {
-      if (!arquivoSelecionado) return;
+      if (arquivosSelecionados.length === 0) return;
       botao.disabled = true;
       limparResultado();
       pararAnimacaoProcessando();
@@ -720,7 +730,7 @@
       progressoTexto.textContent = 'Enviando... 0%';
 
       const formData = new FormData();
-      formData.append('file', arquivoSelecionado);
+      arquivosSelecionados.forEach(arquivo => formData.append('file', arquivo));
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/pdf-splitter/split');

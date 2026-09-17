@@ -182,7 +182,46 @@ class AgrupadorContextualServiceTest {
         List<PaginaClassificada> resultado = agrupador.classificar(List.of("copia do rg do paciente"));
 
         assertEquals(Categoria.DOCUMENTOS, resultado.get(0).getCategoria());
-        assertEquals(MetodoClassificacao.PALAVRA_CHAVE, resultado.get(0).getMetodo());
+        // REGRA_JAVA, não PALAVRA_CHAVE: o Gemini respondeu normalmente (não falhou) - foi uma regra de negócio em
+        // Java que rebaixou a categoria dele. PALAVRA_CHAVE deve ficar reservado pra quando a IA de fato falhou,
+        // senão o resumo mostrado ao usuário ("N páginas não puderam ser classificadas pela IA") conta casos onde
+        // a IA funcionou perfeitamente.
+        assertEquals(MetodoClassificacao.REGRA_JAVA, resultado.get(0).getMetodo());
+    }
+
+    @Test
+    void paginaComPalavraChaveInterrompeBundleTfdSemArrastarAsDemaisPaginasJunto() {
+        // Achado da auditoria (Opus, 2026-09-17): quando o Gemini agrupa VÁRIAS páginas pobres como um único
+        // documento TFD_RS (2-4) e só UMA delas (a 3, um RG anexado) bate uma palavra-chave própria, o
+        // reroteamento antigo arrancava o DOCUMENTO INTEIRO (2, 3 e 4) do bundle RS aberto pela página 1, jogando
+        // as páginas 2 e 4 - que não tinham nenhum sinal próprio e são anexos legítimos do mesmo pedido - junto
+        // com a 3 em DOCUMENTOS. O correto é reroteear só a página 3; as páginas 2 e 4 devem continuar TFD_RS,
+        // herdando o bundle confirmado pela capa (página 1).
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(
+                        new DocumentoDetectado(1, 1, Categoria.TFD_RS),
+                        new DocumentoDetectado(2, 4, Categoria.TFD_RS)),
+                Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(
+                "capa do estado do rio grande do sul - pedido de tfd",
+                CARIMBO_POBRE,
+                CARIMBO_POBRE + " rg",
+                CARIMBO_POBRE));
+
+        assertEquals(Categoria.TFD_RS, resultado.get(0).getCategoria());
+
+        assertEquals(Categoria.TFD_RS, resultado.get(1).getCategoria());
+        assertEquals(MetodoClassificacao.REGRA_BLOCO_TFD, resultado.get(1).getMetodo());
+
+        assertEquals(Categoria.DOCUMENTOS, resultado.get(2).getCategoria());
+        assertEquals(MetodoClassificacao.REGRA_JAVA, resultado.get(2).getMetodo());
+
+        // A página seguinte à interrupção precisa continuar enxergando o bundle RS aberto, não "esquecê-lo" por
+        // causa da página 3 - é exatamente esse esquecimento que o bug antigo causava.
+        assertEquals(Categoria.TFD_RS, resultado.get(3).getCategoria());
+        assertEquals(MetodoClassificacao.REGRA_BLOCO_TFD, resultado.get(3).getMetodo());
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.rafael.pdfsplitter;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -119,20 +120,25 @@ public class PdfSplitService {
     }
 
     public ResultadoSeparacao separar(File arquivoPdf) throws IOException {
-        PDDocument origem;
-        try {
-            origem = Loader.loadPDF(arquivoPdf);
-        } catch (InvalidPasswordException e) {
-            throw new PdfInvalidoException("O PDF está protegido por senha. Remova a senha e envie novamente.", e);
-        } catch (IOException e) {
-            throw new PdfInvalidoException("O arquivo enviado não é um PDF válido ou está corrompido.", e);
+        return separar(List.of(arquivoPdf));
+    }
+
+    /**
+     * Mesma separação de {@link #separar(File)}, mas aceitando vários PDFs de uma vez: eles são concatenados (na
+     * ordem enviada) num único documento antes de classificar, então páginas da mesma categoria vindas de arquivos
+     * diferentes caem no mesmo PDF de saída — do ponto de vista da classificação não há diferença entre isso e um
+     * único PDF já concatenado pelo usuário.
+     */
+    public ResultadoSeparacao separar(List<File> arquivosPdf) throws IOException {
+        if (arquivosPdf.isEmpty()) {
+            throw new PdfInvalidoException("Envie ao menos um PDF.");
         }
 
-        try (origem) {
+        try (DocumentoMesclado mesclado = mesclarPdfs(arquivosPdf)) {
+            PDDocument origem = mesclado.documento();
             if (origem.getNumberOfPages() == 0) {
                 throw new PdfInvalidoException("O PDF enviado não tem páginas.");
             }
-            achatarFormulario(origem);
 
             List<String> textos = extrairTextos(origem);
             List<PaginaClassificada> classificacoes;
@@ -154,6 +160,94 @@ public class PdfSplitService {
             byte[] zip = montarZip(origem, paginasPorCategoria);
             String relatorioJson = new String(gerarRelatorioJson(classificacoes), java.nio.charset.StandardCharsets.UTF_8);
             return new ResultadoSeparacao(zip, relatorioJson);
+        }
+    }
+
+    /**
+     * Documento resultante de {@link #mesclarPdfs}, junto com os PDFs de origem que precisam continuar abertos
+     * enquanto ele for usado (ver o Closeable abaixo) — {@code importPage} compartilha o stream/COS subjacente da
+     * página de origem, então fechar a origem antes de {@code documento} ser lido/salvo corrompe a leitura
+     * (exceção "COSStream has been closed"). {@code fontes} fica vazio no caso de um único arquivo, onde
+     * {@code documento} É o PDF carregado diretamente, sem import.
+     */
+    record DocumentoMesclado(PDDocument documento, List<PDDocument> fontes) implements Closeable {
+        @Override
+        public void close() throws IOException {
+            IOException falha = null;
+            try {
+                documento.close();
+            } catch (IOException e) {
+                falha = e;
+            }
+            for (PDDocument fonte : fontes) {
+                try {
+                    fonte.close();
+                } catch (IOException e) {
+                    if (falha == null) {
+                        falha = e;
+                    } else {
+                        falha.addSuppressed(e);
+                    }
+                }
+            }
+            if (falha != null) {
+                throw falha;
+            }
+        }
+    }
+
+    /**
+     * Carrega um PDF de entrada, já com o formulário (AcroForm) achatado. Para uma única entrada, é o documento
+     * devolvido direto (mesmo comportamento de antes desta mudança); para várias entradas, cada uma é carregada,
+     * achatada e tem suas páginas importadas para um documento novo, na ordem em que os arquivos foram enviados —
+     * do ponto de vista de tudo que vem depois (extração de texto, classificação, separação por categoria), o
+     * resultado é indistinguível de um único PDF que já viesse com essas páginas concatenadas. Os PDFs de origem
+     * usados no import só podem ser fechados depois que {@code documento} tiver sido totalmente lido/salvo — por
+     * isso eles voltam junto no {@link DocumentoMesclado}, não são fechados aqui.
+     */
+    DocumentoMesclado mesclarPdfs(List<File> arquivosPdf) throws IOException {
+        if (arquivosPdf.size() == 1) {
+            PDDocument unico = carregarPdf(arquivosPdf.get(0), 1);
+            achatarFormulario(unico);
+            return new DocumentoMesclado(unico, List.of());
+        }
+
+        PDDocument destino = new PDDocument();
+        List<PDDocument> fontes = new ArrayList<>();
+        try {
+            int indice = 1;
+            for (File arquivo : arquivosPdf) {
+                PDDocument parte = carregarPdf(arquivo, indice);
+                fontes.add(parte);
+                achatarFormulario(parte);
+                for (PDPage pagina : parte.getPages()) {
+                    destino.importPage(pagina);
+                }
+                indice++;
+            }
+        } catch (IOException | RuntimeException e) {
+            fecharSilenciosamente(destino);
+            fontes.forEach(this::fecharSilenciosamente);
+            throw e;
+        }
+        return new DocumentoMesclado(destino, fontes);
+    }
+
+    private void fecharSilenciosamente(PDDocument documento) {
+        try {
+            documento.close();
+        } catch (IOException e) {
+            LOG.debug("Falha ao fechar PDF após erro de mesclagem", e);
+        }
+    }
+
+    private PDDocument carregarPdf(File arquivo, int indice) throws IOException {
+        try {
+            return Loader.loadPDF(arquivo);
+        } catch (InvalidPasswordException e) {
+            throw new PdfInvalidoException("O arquivo " + indice + " está protegido por senha. Remova a senha e envie novamente.", e);
+        } catch (IOException e) {
+            throw new PdfInvalidoException("O arquivo " + indice + " não é um PDF válido ou está corrompido.", e);
         }
     }
 

@@ -1,8 +1,10 @@
 package com.rafael.pdfsplitter;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.PartType;
@@ -30,7 +32,7 @@ public class PdfSplitResource {
     public static class Formulario {
         @RestForm("file")
         @PartType(MediaType.APPLICATION_OCTET_STREAM)
-        public FileUpload file;
+        public List<FileUpload> files;
     }
 
     @POST
@@ -38,12 +40,13 @@ public class PdfSplitResource {
     @Consumes(MediaType.MULTIPART_FORM_DATA)
     @Produces("application/zip")
     public Response separar(Formulario formulario) {
-        if (formulario.file == null) {
-            return erro(Response.Status.BAD_REQUEST, "Envie o PDF no campo 'file' (multipart/form-data).");
+        if (formulario.files == null || formulario.files.isEmpty()) {
+            return erro(Response.Status.BAD_REQUEST, "Envie ao menos um PDF no campo 'file' (multipart/form-data).");
         }
 
         try {
-            ResultadoSeparacao resultado = service.separar(formulario.file.uploadedFile().toFile());
+            List<File> arquivos = formulario.files.stream().map(f -> f.uploadedFile().toFile()).toList();
+            ResultadoSeparacao resultado = service.separar(arquivos);
             String relatorioBase64 = Base64.getEncoder()
                     .encodeToString(resultado.relatorioJson().getBytes(StandardCharsets.UTF_8));
 

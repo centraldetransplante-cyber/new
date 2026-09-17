@@ -12,12 +12,32 @@ public record GeminiRequest(List<Content> contents, GenerationConfig generationC
     public record Content(List<Part> parts) {
     }
 
-    public record Part(String text) {
+    /**
+     * {@code thought} só é usado na resposta (a API pode marcar um trecho como resumo de "pensamento" do modelo,
+     * separado da resposta de verdade) — no request fica sempre null/omitido.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Part(String text, Boolean thought) {
+        public Part(String text) {
+            this(text, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record GenerationConfig(Double temperature, Integer maxOutputTokens, String responseMimeType,
-            Schema responseSchema) {
+            Schema responseSchema, ThinkingConfig thinkingConfig) {
+    }
+
+    /**
+     * Zera o orçamento de "pensamento" (thinking) do modelo para as chamadas de agrupamento: modelos Gemini 3.x
+     * são "reasoning models" e tokens de pensamento contam contra {@code maxOutputTokens} — com um teto apertado
+     * (necessário porque o header HTTP do relatório não pode crescer sem limite, ver
+     * {@code PdfSplitService.LIMITE_PAGINAS_NO_RELATORIO}) o modelo podia gastar o orçamento inteiro pensando e
+     * devolver uma resposta vazia (finishReason MAX_TOKENS, sem nenhuma exceção), causando fallback por
+     * palavra-chave silencioso e indistinguível de uma falha de rede/API real.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ThinkingConfig(Integer thinkingBudget) {
     }
 
     /**
@@ -48,6 +68,6 @@ public record GeminiRequest(List<Content> contents, GenerationConfig generationC
                 null, null, List.of("pagina", "documento", "categoria"));
         Schema arraySchema = new Schema("ARRAY", null, itemSchema, null, null);
         return new GeminiRequest(List.of(new Content(List.of(new Part(texto)))),
-                new GenerationConfig(0.0, maxOutputTokens, "application/json", arraySchema));
+                new GenerationConfig(0.0, maxOutputTokens, "application/json", arraySchema, new ThinkingConfig(0)));
     }
 }
