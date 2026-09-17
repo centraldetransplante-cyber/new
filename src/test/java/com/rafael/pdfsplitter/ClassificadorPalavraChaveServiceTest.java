@@ -34,6 +34,7 @@ class ClassificadorPalavraChaveServiceTest {
         @Override public int tamanhoMaximoArquivoMb() { return 10; }
         @Override public List<String> contextoCarimboProtocoloPadroes() { return CARIMBO_PROTOCOLO; }
         @Override public int contextoMinCaracteresConteudoUtil() { return 120; }
+        @Override public List<String> identificacaoPessoalInequivoca() { return List.of("rg", "cpf"); }
     };
 
     private final ClassificadorPalavraChaveService classificador = new ClassificadorPalavraChaveService(config);

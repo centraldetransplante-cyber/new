@@ -126,21 +126,32 @@ public class AgrupadorContextualService {
                     boolean todasPaginasPobres = todasPobres(normalizados, doc.paginaInicial(), doc.paginaFinal());
                     boolean temCabecalhoDeNovoDocumento = algumaPaginaTemCabecalhoNovoDocumento(normalizados,
                             doc.paginaInicial(), doc.paginaFinal());
+                    // Não é só um booleano "tem sinal" - guarda QUAL categoria própria foi detectada, pra poder
+                    // rotear pra ela diretamente em vez de só bloquear a absorção/fabricação e cair num OUTROS
+                    // genérico quando na verdade dava pra saber que era, por exemplo, DOCUMENTOS.
+                    Categoria categoriaAutoEvidente = categoriaAutoEvidenteOuNull(normalizados, doc.paginaInicial(), doc.paginaFinal());
+                    boolean temSinalDeCategoriaPropria = categoriaAutoEvidente != null;
                     boolean bundleTfdAberto = estadoAnterior != null && CATEGORIAS_TFD.contains(estadoAnterior.categoriaEfetiva());
 
                     // Absorção: um trecho contíguo a um bundle de TFD aberto, sem NENHUM conteúdo real (só carimbo
-                    // de protocolo/boilerplate — comum em anexo escaneado sem OCR), sem cabeçalho de novo pedido e
-                    // sem conseguir se autoconfirmar como RS por conta própria, é tratado como continuação do
-                    // bundle aberto, INDEPENDENTE da categoria bruta que o Gemini deu a ele. Bug real que motivou
-                    // isto: páginas assim saíam com a categoria "adivinhada" pelo Gemini a partir de quase nada
-                    // (ex.: TFD_OUTROS_ESTADOS), fora do bundle TFD_RS ao qual pertenciam de verdade.
-                    boolean absorverNoBundle = !autoconfirmaRs && bundleTfdAberto && todasPaginasPobres
-                            && !temCabecalhoDeNovoDocumento;
+                    // de protocolo/boilerplate — comum em anexo escaneado sem OCR), sem cabeçalho de novo pedido,
+                    // sem palavra-chave de categoria própria (um RG/CPF curto tem pouco texto mas não é "sem
+                    // conteúdo") e sem conseguir se autoconfirmar como RS por conta própria, é tratado como
+                    // continuação do bundle aberto, INDEPENDENTE da categoria bruta que o Gemini deu a ele. Bug
+                    // real que motivou isto: páginas assim saíam com a categoria "adivinhada" pelo Gemini a partir
+                    // de quase nada (ex.: TFD_OUTROS_ESTADOS), fora do bundle TFD_RS ao qual pertenciam de verdade.
+                    boolean absorverNoBundle = !autoconfirmaRs && !temSinalDeCategoriaPropria && bundleTfdAberto
+                            && todasPaginasPobres && !temCabecalhoDeNovoDocumento;
 
                     Categoria categoriaEfetiva;
                     Categoria categoriaBrutaParaEstado;
                     boolean rsConfirmadoAqui;
                     boolean continuaMesmaCategoriaBruta;
+                    // Não nulo quando a categoria final veio de uma decisão do Java baseada em palavra-chave (o
+                    // reroteamento pra categoria própria, ou o rebaixamento pra OUTROS por falta de conteúdo) em
+                    // vez de vir do Gemini - o relatório de classificação precisa refletir isso, senão os totais
+                    // por método subestimam o quanto a rede de segurança do Java realmente decidiu.
+                    MetodoClassificacao metodoForcado = null;
 
                     if (absorverNoBundle) {
                         categoriaEfetiva = estadoAnterior.categoriaEfetiva();
@@ -163,7 +174,25 @@ public class AgrupadorContextualService {
 
                         categoriaEfetiva = categoriaBruta;
                         rsConfirmadoAqui = autoconfirmaRs;
-                        if (categoriaBruta == Categoria.TFD_RS) {
+                        // O reroteamento por palavra-chave própria e o rebaixamento pra OUTROS só valem quando a
+                        // página realmente não tem conteúdo (todasPaginasPobres) - um documento TFD longo e com
+                        // conteúdo clínico real que por acaso menciona uma palavra de outra lista (ex.:
+                        // "encaminhamento" no meio do texto corrido) não pode ser arrancado do bundle por isso.
+                        if (categoriaBruta == Categoria.TFD_RS && !autoconfirmaRs && todasPaginasPobres
+                                && temSinalDeCategoriaPropria) {
+                            // Palavra-chave de RG/CPF/protocolo própria vence mesmo quando o Gemini deu a mesma
+                            // categoria bruta que um documento anterior confirmado (o que herdaria a confirmação
+                            // abaixo) - um RG anexado não vira TFD_RS só porque está contíguo e o Gemini repetiu a
+                            // categoria por engano. NUNCA vence, porém, quando a própria página se autoconfirma
+                            // como RS (marcador do RS de verdade) - um sinal de conteúdo real sempre pesa mais que
+                            // uma correspondência de palavra-chave incidental.
+                            categoriaEfetiva = categoriaAutoEvidente;
+                            rsConfirmadoAqui = false;
+                            metodoForcado = MetodoClassificacao.PALAVRA_CHAVE;
+                            LOG.infof("Documento páginas %d-%d marcado TFD_RS pelo Gemini mas tem palavra-chave "
+                                    + "própria de %s, classificando como tal", doc.paginaInicial(), doc.paginaFinal(),
+                                    categoriaAutoEvidente);
+                        } else if (categoriaBruta == Categoria.TFD_RS) {
                             if (!rsConfirmadoAqui && continuaMesmaCategoriaBruta && estadoAnterior.rsConfirmado()) {
                                 // Nenhuma página DESTE trecho bate no marcador do RS, mas ele é a continuação
                                 // direta de um documento que já tinha sido confirmado - exatamente o caso do laudo
@@ -171,11 +200,14 @@ public class AgrupadorContextualService {
                                 rsConfirmadoAqui = true;
                             }
                             if (!rsConfirmadoAqui) {
-                                if (todasPaginasPobres) {
-                                    // Sem conteúdo real e sem bundle aberto pra herdar de (senão teria caído em
+                                if (todasPaginasPobres && !temCabecalhoDeNovoDocumento) {
+                                    // Sem conteúdo real, sem cabeçalho de novo pedido (esse cabeçalho já seria, por
+                                    // si só, sinal de categoria - ver o branch simétrico de TFD_OUTROS_ESTADOS
+                                    // abaixo) e sem bundle aberto pra herdar de (senão teria caído em
                                     // absorverNoBundle acima) - fabricar TFD_OUTROS_ESTADOS a partir de zero
                                     // conteúdo seria uma afirmação de negócio falsa; OUTROS é honesto.
                                     categoriaEfetiva = Categoria.OUTROS;
+                                    metodoForcado = MetodoClassificacao.PALAVRA_CHAVE;
                                     LOG.warnf("Documento páginas %d-%d marcado TFD_RS pelo Gemini mas sem conteúdo "
                                             + "real (só carimbo/boilerplate) e sem bundle RS aberto pra herdar - "
                                             + "classificando como OUTROS em vez de TFD_OUTROS_ESTADOS",
@@ -187,6 +219,21 @@ public class AgrupadorContextualService {
                                             + "rebaixando para TFD_OUTROS_ESTADOS", doc.paginaInicial(), doc.paginaFinal());
                                 }
                             }
+                        } else if (categoriaBruta == Categoria.TFD_OUTROS_ESTADOS && todasPaginasPobres
+                                && !temCabecalhoDeNovoDocumento) {
+                            // Mesmo raciocínio do guard de RS acima, mas para quando o Gemini já devolve
+                            // TFD_OUTROS_ESTADOS direto (não é um rebaixamento) numa página sem conteúdo real e
+                            // sem cabeçalho de novo pedido (esse cabeçalho já é, por si só, um sinal de categoria
+                            // legítimo - não deve virar OUTROS só por ser curto). Não exige "sem bundle aberto": se
+                            // houvesse um bundle aberto E nenhuma palavra-chave própria, o trecho já teria caído em
+                            // absorverNoBundle acima - chegar aqui com bundleTfdAberto=true só acontece quando
+                            // temSinalDeCategoriaPropria bloqueou a absorção, e nesse caso É pra rerotear pra
+                            // categoria própria mesmo com bundle aberto.
+                            categoriaEfetiva = temSinalDeCategoriaPropria ? categoriaAutoEvidente : Categoria.OUTROS;
+                            metodoForcado = MetodoClassificacao.PALAVRA_CHAVE;
+                            LOG.warnf("Documento páginas %d-%d marcado TFD_OUTROS_ESTADOS pelo Gemini mas sem "
+                                    + "conteúdo real (só carimbo/boilerplate) - classificando como %s",
+                                    doc.paginaInicial(), doc.paginaFinal(), categoriaEfetiva);
                         }
                         categoriaBrutaParaEstado = categoriaBruta;
                     }
@@ -200,9 +247,10 @@ public class AgrupadorContextualService {
                             continue;
                         }
                         categoriaFinal[idx] = categoriaEfetiva;
-                        metodoFinal[idx] = absorverNoBundle || (continuaMesmaCategoriaBruta && pagina1based == doc.paginaInicial())
-                                ? MetodoClassificacao.REGRA_BLOCO_TFD
-                                : MetodoClassificacao.GEMINI_CONTEXTO;
+                        metodoFinal[idx] = metodoForcado != null ? metodoForcado
+                                : absorverNoBundle || (continuaMesmaCategoriaBruta && pagina1based == doc.paginaInicial())
+                                        ? MetodoClassificacao.REGRA_BLOCO_TFD
+                                        : MetodoClassificacao.GEMINI_CONTEXTO;
                         estadoPorPagina[idx] = novoEstado;
                     }
                 }
@@ -276,6 +324,53 @@ public class AgrupadorContextualService {
                 continue;
             }
             if (palavraChave.contemAlgumaPalavra(normalizados.get(pagina - 1), config.tfdCabecalhoNovoDocumento())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Um documento curto (poucas letras de conteúdo útil) não é necessariamente um anexo escaneado sem OCR — pode
+     * ser um documento pessoal genuinamente curto (cópia de RG/CPF, por exemplo, costuma ter pouco texto
+     * extraível mesmo com conteúdo real). Se alguma página já bate numa palavra-chave de categoria própria,
+     * devolve QUAL categoria (não só um booleano) — isso é sinal forte o bastante pra não ser absorvido/rebaixado
+     * às cegas: em vez de só bloquear a absorção e cair num {@code OUTROS} genérico, roteia direto pra ela.
+     *
+     * Deliberadamente NÃO considera {@link ClassificadorConfig#exames()}: "laudo"/"exame" são exatamente os
+     * termos do cenário que este arquivo existe pra tratar (regra de negócio #2 — um LAUDO MÉDICO é um anexo
+     * legítimo do MESMO bundle de TFD/RS, mesmo lendo como EXAMES isoladamente). Usar essa lista aqui bloquearia a
+     * absorção de um laudo médico pobre/mal-OCRizado contíguo a um bundle aberto, reproduzindo o mesmo bug que a
+     * arquitetura de janela+agrupamento foi desenhada pra resolver. Só {@link ClassificadorConfig#documentos()}
+     * (RG/CPF/identidade — nunca parte do conteúdo médico de um pedido de TFD, sempre um documento à parte
+     * independente de contexto) e {@link ClassificadorConfig#protocoloEncaminhamento()} são sinais inequívocos o
+     * bastante pra vencer a absorção/continuação. {@code null} se nenhuma bater.
+     */
+    private Categoria categoriaAutoEvidenteOuNull(List<String> normalizados, int paginaInicial, int paginaFinal) {
+        // Duas passadas (não uma só) pra que a prioridade PROTOCOLO_ENCAMINHAMENTO > DOCUMENTOS valha pro
+        // documento inteiro, não só pra primeira página que bater em alguma coisa - senão um documento de 2
+        // páginas com "rg" na primeira e "protocolo de encaminhamento" na segunda voltaria DOCUMENTOS (a
+        // categoria da página 1) em vez de PROTOCOLO_ENCAMINHAMENTO (a mais específica, presente em algum lugar
+        // do documento).
+        if (algumaPaginaContem(normalizados, paginaInicial, paginaFinal, config.protocoloEncaminhamento())) {
+            return Categoria.PROTOCOLO_ENCAMINHAMENTO;
+        }
+        if (algumaPaginaContem(normalizados, paginaInicial, paginaFinal, config.identificacaoPessoalInequivoca())) {
+            return Categoria.DOCUMENTOS;
+        }
+        return null;
+    }
+
+    private boolean algumaPaginaContem(List<String> normalizados, int paginaInicial, int paginaFinal, List<String> palavrasChave) {
+        for (int pagina = paginaInicial; pagina <= paginaFinal; pagina++) {
+            if (pagina < 1 || pagina > normalizados.size()) {
+                continue;
+            }
+            // Remove o carimbo ANTES de checar palavra-chave - senão uma palavra que por acaso aparecesse dentro
+            // do próprio texto do carimbo (ex. uma futura entrada nas listas de configuração que bata em algo do
+            // boilerplate) daria um sinal de categoria falso numa página genuinamente sem conteúdo.
+            String texto = palavraChave.removerCarimboDeProtocolo(normalizados.get(pagina - 1));
+            if (palavraChave.contemAlgumaPalavra(texto, palavrasChave)) {
                 return true;
             }
         }

@@ -143,6 +143,26 @@ boilerplate looks like "has content" to every existing check. Root-caused and th
 against the live Render deployment with a synthetic reproduction PDF (12 pages: real RS capa + 10 stamp-only pages
 straddling a window boundary) before being trusted. If a future report says "TFD_RS/TFD_OUTROS_ESTADOS came out
 wrong" again, re-check this exact area first — see [[feedback-tfd-domain-rules]].
+
+- **Follow-up hardening (same day, found by `/code-review ultra` run repeatedly against the fix above)**: a short
+  page (few real letters) that raw-matches `classificador.identificacao-pessoal-inequivoca` (a deliberately narrow
+  RG/CPF/SUS-card list, NOT the broader `classificador.documentos` — that one includes ambiguous terms like
+  "encaminhamento" that can legitimately appear in real TFD prose) or `classificador.protocolo-encaminhamento` is
+  routed to that category (`AgrupadorContextualService.categoriaAutoEvidenteOuNull`) instead of being
+  absorbed/downgraded as if it had zero content — an RG copy attached to a TFD request is short but not "nothing".
+  Own-page `TFD_RS` self-confirmation (a real RS marker) always wins over this keyword reroute, and the reroute
+  only fires when the page is also "pobre" — rich TFD content that happens to mention an incidental word (e.g.
+  "encaminhamento" in running clinical text) is never pulled out of its bundle by this. Deliberately does **not**
+  consider `classificador.exames` (a genuine LAUDO MÉDICO attachment reads as "exame"-ish per business rule #2 in
+  [[feedback-tfd-domain-rules]] and must stay absorbable into the RS bundle, not get rerouted to `exames.pdf`).
+  **Known remaining gap, not yet fixed**: if this keyword reroute fires on a page in the middle of an otherwise
+  contiguous TFD run (e.g. an RG sandwiched between TFD pages), the "open bundle" tracking
+  (`estadoAnterior.categoriaEfetiva()`) closes at that page, so a *further* trailing poor/unconfirmed TFD-labeled
+  page right after the RG won't reconnect to the original TFD bundle it should still belong to. Would need the
+  bundle state to track "last TFD-thread state" separately from "last page's state" to fix properly — not done
+  because the triggering sequence (confirmed TFD → RG interruption → another unconfirmed poor TFD page) is a
+  fairly narrow compound case and the current fallback (that trailing page becomes `OUTROS`, not silently wrong)
+  isn't unsafe, just suboptimal. Revisit if a real report shows this pattern.
 - **No Gemini key at all** still works: `geminiService.disponivel()` is checked per window, so every window
   immediately takes the fallback path above — equivalent to running keyword-only classification per-window (without
   TFD stitching across window boundaries in that condition, which only matters for a bundle that happens to straddle

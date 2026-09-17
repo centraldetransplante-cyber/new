@@ -131,4 +131,16 @@ public interface ClassificadorConfig {
      */
     @WithDefault("120")
     int contextoMinCaracteresConteudoUtil();
+
+    /**
+     * Termos INEQUÍVOCOS de documento de identificação pessoal — usados só por
+     * {@code AgrupadorContextualService.categoriaAutoEvidenteOuNull} para decidir se uma página pobre/curta é na
+     * verdade um documento pessoal (RG/CPF anexado a um pedido de TFD) em vez de ser absorvida no bundle aberto.
+     * Deliberadamente um subconjunto de {@link #documentos()}, mais restrito: exclui termos como "declaracao",
+     * "procuracao" e "encaminhamento" que são específicos o bastante pro fallback por palavra-chave da página
+     * inteira, mas ambíguos demais pra essa decisão (um "encaminhamento" pode ser parte do texto médico corrido
+     * de um pedido de TFD legítimo, não necessariamente um documento à parte).
+     */
+    @WithDefault("rg,cpf,identidade,cartao sus,carteira do sus")
+    List<String> identificacaoPessoalInequivoca();
 }

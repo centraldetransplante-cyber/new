@@ -39,6 +39,7 @@ class AgrupadorContextualServiceTest {
         @Override public int tamanhoMaximoArquivoMb() { return 10; }
         @Override public List<String> contextoCarimboProtocoloPadroes() { return CARIMBO_PROTOCOLO; }
         @Override public int contextoMinCaracteresConteudoUtil() { return 120; }
+        @Override public List<String> identificacaoPessoalInequivoca() { return List.of("rg", "cpf"); }
     };
 
     private final ClassificadorPalavraChaveService palavraChave = new ClassificadorPalavraChaveService(config);
@@ -111,6 +112,175 @@ class AgrupadorContextualServiceTest {
         List<PaginaClassificada> resultado = agrupador.classificar(List.of(CARIMBO_POBRE));
 
         assertEquals(Categoria.OUTROS, resultado.get(0).getCategoria());
+    }
+
+    @Test
+    void tfdOutrosEstadosDiretoDoGeminiSemConteudoRealESemBundleViraOutros() {
+        // Achado do code-review: o guard so cobria o caminho de REBAIXAMENTO (Gemini disse TFD_RS,
+        // Java rebaixou). Se o Gemini ja devolve TFD_OUTROS_ESTADOS direto numa pagina pobre sem
+        // nenhum bundle TFD aberto pra herdar, o mesmo raciocinio se aplica - nao fabricar a
+        // categoria do nada.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(new DocumentoDetectado(1, 1, Categoria.TFD_OUTROS_ESTADOS)), Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(CARIMBO_POBRE));
+
+        assertEquals(Categoria.OUTROS, resultado.get(0).getCategoria());
+    }
+
+    @Test
+    void duasPaginasPobresSeguidasSemBundleNaoCascateiamParaOutrosEstados() {
+        // Achado do code-review: apos uma pagina TFD_RS ser rebaixada pra OUTROS (pobre, sem bundle),
+        // o bundle aberto (baseado na categoria EFETIVA) se fecha - uma segunda pagina pobre contigua,
+        // que o Gemini rotula TFD_OUTROS_ESTADOS, nao pode "vazar" essa categoria so porque a anterior
+        // tambem era pobre; ambas devem ficar OUTROS de forma consistente.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(
+                        new DocumentoDetectado(1, 1, Categoria.TFD_RS),
+                        new DocumentoDetectado(2, 2, Categoria.TFD_OUTROS_ESTADOS)),
+                Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(CARIMBO_POBRE, CARIMBO_POBRE));
+
+        assertEquals(Categoria.OUTROS, resultado.get(0).getCategoria());
+        assertEquals(Categoria.OUTROS, resultado.get(1).getCategoria());
+    }
+
+    @Test
+    void documentoPessoalCurtoComPalavraChaveNaoEAbsorvidoNoBundleAbertoMesmoSendoPobre() {
+        // Achado do code-review: um RG/CPF anexado logo apos a capa RS costuma ter pouco texto
+        // extraivel (curto o bastante pra contar como "pobre" pelo limiar de caracteres), mas isso
+        // NAO significa que deva ser engolido pelo bundle de TFD - a palavra-chave da propria
+        // categoria (aqui "rg") e sinal forte o bastante pra nao absorver.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(
+                        new DocumentoDetectado(1, 1, Categoria.TFD_RS),
+                        new DocumentoDetectado(2, 2, Categoria.DOCUMENTOS)),
+                Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(
+                "capa do estado do rio grande do sul - pedido de tfd",
+                "copia do rg do paciente"));
+
+        assertEquals(Categoria.TFD_RS, resultado.get(0).getCategoria());
+        assertEquals(Categoria.DOCUMENTOS, resultado.get(1).getCategoria());
+    }
+
+    @Test
+    void tfdRsSemMarcadorEComPalavraChavePropriaRoteiaParaCategoriaDetectadaEmVezDeOutros() {
+        // Achado do code-review: o Gemini rotulou (errado) uma pagina curta de RG como TFD_RS - sem
+        // marcador do RS, sem bundle pra herdar, mas com uma palavra-chave de categoria propria
+        // ("rg"). Deve rotear pra DOCUMENTOS (a categoria real), nao cair num OUTROS generico so
+        // porque o texto e curto o bastante pra contar como "pobre".
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(new DocumentoDetectado(1, 1, Categoria.TFD_RS)), Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of("copia do rg do paciente"));
+
+        assertEquals(Categoria.DOCUMENTOS, resultado.get(0).getCategoria());
+        assertEquals(MetodoClassificacao.PALAVRA_CHAVE, resultado.get(0).getMetodo());
+    }
+
+    @Test
+    void tfdComConteudoRicoQueMencionaPalavraIncidentalNaoEDesviadoDaCategoria() {
+        // Achado do code-review: o reroteamento por palavra-chave propria (e o rebaixamento pra
+        // OUTROS) so podem valer pra pagina "pobre" de verdade - um documento TFD longo, com
+        // conteudo clinico real, que por acaso menciona uma palavra de outra lista (aqui "certidao",
+        // que esta em config.documentos()) no meio do texto corrido NAO pode ser arrancado do bundle
+        // por isso. Sem marcador do RS e sem bundle aberto, deve permanecer TFD_OUTROS_ESTADOS.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(new DocumentoDetectado(1, 1, Categoria.TFD_RS)), Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(
+                "pedido de tfd sem indicar o estado, com queixa clinica detalhada relatando necessidade de "
+                        + "juntar certidao de nascimento ao processo, alem de historico medico completo do paciente"));
+
+        assertEquals(Categoria.TFD_OUTROS_ESTADOS, resultado.get(0).getCategoria());
+    }
+
+    @Test
+    void paginaPobreComPalavraChavePropriaERoteadaMesmoComBundleTfdAberto() {
+        // Achado do code-review: o reroteamento pra categoria propria so disparava quando NAO havia
+        // bundle TFD aberto - com bundle aberto, a pagina ficava presa na categoria bruta errada do
+        // Gemini (TFD_OUTROS_ESTADOS) em vez de ser reconhecida como o RG que realmente e.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(
+                        new DocumentoDetectado(1, 1, Categoria.TFD_RS),
+                        new DocumentoDetectado(2, 2, Categoria.TFD_OUTROS_ESTADOS)),
+                Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(
+                "capa do estado do rio grande do sul - pedido de tfd",
+                "copia do rg do paciente"));
+
+        assertEquals(Categoria.TFD_RS, resultado.get(0).getCategoria());
+        assertEquals(Categoria.DOCUMENTOS, resultado.get(1).getCategoria());
+    }
+
+    @Test
+    void laudoMedicoPobreContiguoAoBundleEAbsorvidoMesmoContendoPalavraDeExames() {
+        // Achado do code-review, o mais critico dos tres: "laudo" esta na lista de config.exames(), e um
+        // LAUDO MEDICO anexo ao pedido de TFD/RS (regra de negocio #2) e exatamente o cenario que a
+        // absorcao por pagina pobre existe pra resolver. Se o guard de "categoria propria" considerasse
+        // EXAMES, um laudo mal-OCRizado (poucas letras, mas com a palavra "laudo" sobrevivendo) seria
+        // arrancado do bundle RS e mandado pra exames.pdf - reproduzindo o bug original desta arquitetura
+        // por um caminho novo. Precisa continuar sendo absorvido no bundle TFD_RS.
+        String laudoPobreComPalavraExame = "laudo " + CARIMBO_POBRE;
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(
+                        new DocumentoDetectado(1, 1, Categoria.TFD_RS),
+                        new DocumentoDetectado(2, 2, Categoria.TFD_OUTROS_ESTADOS)),
+                Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(
+                "capa do estado do rio grande do sul - pedido de tfd",
+                laudoPobreComPalavraExame));
+
+        assertEquals(Categoria.TFD_RS, resultado.get(1).getCategoria());
+        assertEquals(MetodoClassificacao.REGRA_BLOCO_TFD, resultado.get(1).getMetodo());
+    }
+
+    @Test
+    void rgComMesmaCategoriaBrutaDeDocumentoRsConfirmadoNaoHerdaTfdRs() {
+        // Achado do code-review: se o Gemini repete TFD_RS (a mesma categoria bruta do documento
+        // anterior confirmado) por engano pra um RG anexado, a heranca de confirmacao nao pode vencer o
+        // sinal de palavra-chave propria - um RG nunca deveria virar TFD_RS, seja qual for a categoria
+        // bruta que o Gemini deu a ele.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(
+                        new DocumentoDetectado(1, 1, Categoria.TFD_RS),
+                        new DocumentoDetectado(2, 2, Categoria.TFD_RS)),
+                Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(List.of(
+                "capa do estado do rio grande do sul - pedido de tfd",
+                "copia do rg do paciente"));
+
+        assertEquals(Categoria.TFD_RS, resultado.get(0).getCategoria());
+        assertEquals(Categoria.DOCUMENTOS, resultado.get(1).getCategoria());
+    }
+
+    @Test
+    void autoconfirmacaoDeRsVenceSinalDeCategoriaPropriaIncidental() {
+        // Achado do code-review: uma capa RS curta que por acaso menciona uma palavra de
+        // identificacao-pessoal-inequivoca ("rg") no meio do texto NAO pode ser desviada pra
+        // DOCUMENTOS so por isso - o marcador de RS de verdade na propria pagina sempre vence.
+        ResultadoAgrupamento janela = new ResultadoAgrupamento(
+                List.of(new DocumentoDetectado(1, 1, Categoria.TFD_RS)), Set.of());
+        AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
+
+        List<PaginaClassificada> resultado = agrupador.classificar(
+                List.of("pedido de tfd do estado do rio grande do sul, anexar copia do rg do paciente"));
+
+        assertEquals(Categoria.TFD_RS, resultado.get(0).getCategoria());
     }
 
     @Test
@@ -231,7 +401,7 @@ class AgrupadorContextualServiceTest {
                 "trecho generico de tfd sem nenhum marcador de estado, com bastante conteudo clinico detalhado "
                         + "descrevendo o quadro do paciente, historico de doencas e justificativa do procedimento solicitado",
                 "outro trecho generico de tfd tambem sem nenhum marcador de estado, com conteudo clinico detalhado "
-                        + "descrevendo evolucao do quadro, exames complementares realizados e conduta medica adotada",
+                        + "descrevendo evolucao do quadro, sinais vitais observados e conduta medica adotada pela equipe",
                 "novo pedido de tfd que menciona claramente o estado do rio grande do sul"));
 
         assertEquals(Categoria.TFD_OUTROS_ESTADOS, resultado.get(0).getCategoria());
@@ -271,7 +441,8 @@ class AgrupadorContextualServiceTest {
         AgrupadorContextualService agrupador = criar(new GeminiFalso(List.of(janela)));
 
         List<PaginaClassificada> resultado = agrupador.classificar(List.of(
-                "pedido de tfd generico sem nenhum marcador de estado, com bastante conteudo clinico detalhado",
+                "pedido de tfd generico sem nenhum marcador de estado, com bastante conteudo clinico detalhado "
+                        + "descrevendo o quadro do paciente, historico de doencas e justificativa do procedimento solicitado",
                 CARIMBO_POBRE));
 
         assertEquals(Categoria.TFD_OUTROS_ESTADOS, resultado.get(0).getCategoria());

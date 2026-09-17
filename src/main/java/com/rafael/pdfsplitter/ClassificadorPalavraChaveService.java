@@ -98,11 +98,25 @@ public class ClassificadorPalavraChaveService {
         if (textoNormalizado == null || textoNormalizado.isBlank()) {
             return true;
         }
+        long letras = LETRAS.matcher(removerCarimboDeProtocolo(textoNormalizado)).results().count();
+        return letras < config.contextoMinCaracteresConteudoUtil();
+    }
+
+    /**
+     * Remove as frases de carimbo/boilerplate de {@link ClassificadorConfig#contextoCarimboProtocoloPadroes()} de
+     * um texto já normalizado — usado tanto por {@link #paginaPobre} quanto por qualquer verificação de
+     * palavra-chave que precise ignorar o carimbo (ex.: {@code AgrupadorContextualService} checando se uma página
+     * "pobre" ainda assim tem uma palavra-chave de categoria própria: sem remover o carimbo antes, uma palavra que
+     * por acaso aparecesse dentro do próprio texto do carimbo daria um sinal de categoria falso).
+     */
+    public String removerCarimboDeProtocolo(String textoNormalizado) {
+        if (textoNormalizado == null) {
+            return "";
+        }
         String semCarimbo = textoNormalizado;
         for (String padrao : config.contextoCarimboProtocoloPadroes()) {
             semCarimbo = semCarimbo.replace(normalizar(padrao), " ");
         }
-        long letras = LETRAS.matcher(semCarimbo).results().count();
-        return letras < config.contextoMinCaracteresConteudoUtil();
+        return semCarimbo;
     }
 }
