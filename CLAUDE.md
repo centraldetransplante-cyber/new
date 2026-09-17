@@ -92,23 +92,57 @@ Key pieces:
 - **Windows run sequentially** (not parallel) for now — simpler to reason about correctness-wise; if latency on
   large PDFs (50+ pages) becomes a problem, parallelizing across windows (each window's Gemini call is independent
   given its own context slice) is the natural next step, capped at a few concurrent calls to avoid 429s.
-- **Cross-window stitching** is a plain Java rule in `AgrupadorContextualService.classificar`, not another prompt
-  round-trip: if the first document of window *k* starts exactly where the last document of window *k-1* ended,
-  both have the *same* category, and that category is TFD (`TFD_RS`/`TFD_OUTROS_ESTADOS`), they're merged into one
-  bundle. Restricted to TFD on purpose — that's the only category where a request routinely spans a window boundary
-  (10 pages); merging arbitrary same-category singles just because they're adjacent would be over-eager elsewhere.
-- **`TFD_RS` gets a hard Java guard, never just trusted from the model**: `algumaPaginaConfirmaRs` demotes a
-  Gemini-labeled `TFD_RS` document to `TFD_OUTROS_ESTADOS` unless at least one of its pages actually contains both a
-  `classificador.tfd-rs-marcador` term and a `classificador.tfd-termo-generico` term — the same condition
-  `ClassificadorPalavraChaveService.classificar` uses. This is deliberately not symmetric: a stray RS marker never
-  promotes a document *to* `TFD_RS`.
+- **Bundle state is tracked per page, not as a single "open document" variable** (`AgrupadorContextualService`,
+  `EstadoBundle[] estadoPorPagina`, one slot per page, persisted across the whole `classificar()` call — not reset
+  per window). Both the documents loop and the unresolved-pages loop write into it, and both look up
+  "the state of the page immediately before this one" from the array rather than from a loop-local variable. This
+  is what makes cross-window/cross-gap stitching correct regardless of which loop last touched a given page — see
+  the 2026-09-17 bug fix below for why that distinction mattered. `EstadoBundle` keeps the RAW category Gemini gave
+  a document *and* the EFFECTIVE (possibly downgraded) one separately; continuation checks always compare raw-to-raw,
+  never raw-to-effective.
+- **Cross-window/cross-gap stitching**: if a new document starts exactly where the tracked state of the previous
+  page ended, both have the *same RAW* category, and that category is TFD (`TFD_RS`/`TFD_OUTROS_ESTADOS`), it's
+  treated as a continuation of the same bundle (inherits RS-confirmation if applicable). Restricted to TFD on
+  purpose — that's the only category where a request routinely spans a window boundary (10 pages); merging
+  arbitrary same-category singles just because they're adjacent would be over-eager elsewhere.
+- **Pages with no real content ("pobre") get absorbed into an open TFD bundle regardless of what raw category
+  Gemini gave them** (`ClassificadorPalavraChaveService.paginaPobre` + the `absorverNoBundle` check in
+  `AgrupadorContextualService`). A "pobre" page is one where, after stripping known protocol-stamp/boilerplate
+  phrases (`classificador.contexto-carimbo-protocolo-padroes`), fewer than `classificador.contexto-min-caracteres-
+  conteudo-util` letters remain — common for scanned attachments with no OCR text layer, where PDFBox only picks up
+  an e-protocolo validation stamp. Guards against over-absorption: a page that self-confirms `TFD_RS` on its own
+  merits (own RS marker) is never absorbed instead of trusted directly; a page matching
+  `classificador.tfd-cabecalho-novo-documento` (capa of a genuinely new request) is never absorbed either.
+- **`TFD_RS` gets a hard Java guard, never just trusted from the model**: `algumaPaginaConfirmaRs` checks that at
+  least one of a document's pages actually contains both a `classificador.tfd-rs-marcador` term and a
+  `classificador.tfd-termo-generico` term before accepting `TFD_RS`. If it fails and the document isn't rescued by
+  bundle continuation/absorption above, it downgrades to `TFD_OUTROS_ESTADOS` — *unless* the document is also
+  "pobre" (no real content at all), in which case it becomes `OUTROS` instead: fabricating an affirmative business
+  category (`TFD_OUTROS_ESTADOS`, "this is a TFD request from another state") from zero actual content was itself a
+  bug (see below), not a safe default. This is deliberately not symmetric: a stray RS marker never promotes a
+  document *to* `TFD_RS`.
 - **Fallback is per-window, not per-document**: if a window's Gemini call fails after retry, or comes back with
   under 60% of its pages resolved (`COBERTURA_MINIMA`), the *entire* window falls back to
   `ClassificadorPalavraChaveService.classificar` page-by-page (no TFD block-stitching within that fallback stretch —
   a deliberate simplification; `PAGINA` mode remains the answer if that ever proves insufficient on real data). A
-  single unresolved page *within* an otherwise-successful window inherits the previous page's category if there is
-  one (holes in the middle of an identified block are overwhelmingly likely to be continuations of it), else falls
-  back to keyword classification for just that page.
+  single unresolved page *within* an otherwise-successful window inherits the tracked state of the previous page if
+  there is one (holes in the middle of an identified block are overwhelmingly likely to be continuations of it),
+  else falls back to keyword classification for just that page.
+
+**Bug fixed 2026-09-17** (real production PDF, protocol `26.255.858-4`): a TFD/RS request with several scanned
+attachment pages with no OCR text (only an e-protocolo validation stamp survived extraction) came out with those
+pages in `tfd_outros_estados.pdf` instead of staying in the `tfd_rs` bundle. Root cause was four compounding
+bugs, all in the pre-2026-09-17 version of `AgrupadorContextualService`: (1) continuation compared a new document's
+raw category to the *previous document's already-downgraded* category instead of its raw one; (2) the "open
+document" state was a loop-local variable only updated inside the documents loop, so an unresolved page at the end
+of a window silently broke stitching with the next window; (3) the RS guard downgraded a document with *zero real
+content* to the affirmative `TFD_OUTROS_ESTADOS` instead of a neutral category; (4) there was no concept anywhere
+in the pipeline of "page with no real content" distinct from `isBlank()` — a page that's 90% e-protocolo stamp
+boilerplate looks like "has content" to every existing check. Root-caused and the fix designed by an Opus agent
+(report only, no code — see [[feedback-opus-design-then-sonnet-implement]]), implemented and verified end-to-end
+against the live Render deployment with a synthetic reproduction PDF (12 pages: real RS capa + 10 stamp-only pages
+straddling a window boundary) before being trusted. If a future report says "TFD_RS/TFD_OUTROS_ESTADOS came out
+wrong" again, re-check this exact area first — see [[feedback-tfd-domain-rules]].
 - **No Gemini key at all** still works: `geminiService.disponivel()` is checked per window, so every window
   immediately takes the fallback path above — equivalent to running keyword-only classification per-window (without
   TFD stitching across window boundaries in that condition, which only matters for a bundle that happens to straddle
