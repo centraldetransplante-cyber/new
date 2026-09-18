@@ -222,8 +222,9 @@ public class GeminiClassificadorService {
         }
         int ultimaPaginaDecisao = primeiraPaginaDecisao + textosDecisao.size() - 1;
         String prompt = montarPromptAgrupamento(textosContexto, primeiraPaginaContexto, textosDecisao, primeiraPaginaDecisao);
-        // Piso alto o bastante pra sobrar espaço de saída mesmo com thinkingBudget=0 (ver GeminiRequest.ThinkingConfig);
-        // o valor antigo (40*n+256) já causou resposta vazia/truncada em janelas maiores sem gerar nenhuma exceção.
+        // Piso alto o bastante pra sobrar espaço de saída mesmo com o "pensamento" padrão do modelo (não dá pra
+        // desligar em gemini-3.5-flash-lite - ver GeminiRequest.deJsonAgrupamento); o valor antigo (40*n+256) já
+        // causou resposta vazia/truncada em janelas maiores sem gerar nenhuma exceção.
         int maxOutputTokens = Math.min(8192, 60 * textosDecisao.size() + 2048);
         List<String> categoriasValidas = Arrays.stream(Categoria.values()).map(Enum::name).toList();
 
